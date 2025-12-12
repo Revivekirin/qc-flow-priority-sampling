@@ -11,7 +11,7 @@ import robomimic.utils.env_utils as EnvUtils
 import robomimic.utils.file_utils as FileUtils
 import robomimic.utils.env_utils as EnvUtils
 import robomimic.utils.obs_utils as ObsUtils
-from robomimic import DATASET_REGISTRY
+# from robomimic import DATASET_REGISTRY
 
 from utils.datasets import Dataset
 
@@ -74,7 +74,7 @@ def _check_dataset_exists(env_name):
     else:
         file_name = "low_dim_v15.hdf5"
     download_folder = os.path.join(
-        expanduser("~/.robomimic"), 
+        expanduser("/home/sophia435256/workspace2/git/qc/robomimic/dataset"), 
         task,
         dataset_type,
         file_name

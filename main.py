@@ -13,6 +13,7 @@ from utils.datasets import Dataset, ReplayBuffer
 from evaluation import evaluate
 from agents import agents
 import numpy as np
+import jax.numpy as jnp
 
 if 'CUDA_VISIBLE_DEVICES' in os.environ:
     os.environ['EGL_DEVICE_ID'] = os.environ['CUDA_VISIBLE_DEVICES']
@@ -162,6 +163,7 @@ def main(_):
     offline_init_time = time.time()
     # Offline RL
     for i in tqdm.tqdm(range(1, FLAGS.offline_steps + 1)):
+
         log_step += 1
 
         if FLAGS.ogbench_dataset_dir is not None and FLAGS.dataset_replace_interval != 0 and i % FLAGS.dataset_replace_interval == 0:
@@ -179,6 +181,7 @@ def main(_):
         batch = train_dataset.sample_sequence(config['batch_size'], sequence_length=FLAGS.horizon_length, discount=discount)
 
         agent, offline_info = agent.update(batch)
+        print("[DEBUG] offline info:", offline_info)
 
         if i % FLAGS.log_interval == 0:
             logger.log(offline_info, "offline_agent", step=log_step)

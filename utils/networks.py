@@ -205,6 +205,7 @@ class Value(nn.Module):
             inputs = [self.encoder(observations)]
         else:
             inputs = [observations]
+
         if actions is not None:
             inputs.append(actions)
         inputs = jnp.concatenate(inputs, axis=-1)
@@ -248,6 +249,7 @@ class ActorVectorField(nn.Module):
         """
         if not is_encoded and self.encoder is not None:
             observations = self.encoder(observations)
+            
         if times is None:
             inputs = jnp.concatenate([observations, actions], axis=-1)
         else:

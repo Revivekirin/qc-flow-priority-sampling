@@ -18,37 +18,81 @@ class ACFQLAgent(flax.struct.PyTreeNode):
     rng: Any
     network: Any
     config: Any = nonpytree_field()
-
+    
     def critic_loss(self, batch, grad_params, rng):
-        """Compute the FQL critic loss."""
-
+        """FQL critic loss with optional PTR weighted target"""
+        
         if self.config["action_chunking"]:
             batch_actions = jnp.reshape(batch["actions"], (batch["actions"].shape[0], -1))
         else:
-            batch_actions = batch["actions"][..., 0, :] # take the first action
+            batch_actions = batch["actions"][..., 0, :]
         
-        # TD loss
+        # ===== Standard target (policy's action) =====
         rng, sample_rng = jax.random.split(rng)
-        next_actions = self.sample_actions(batch['next_observations'][..., -1, :], rng=sample_rng)
-
-        next_qs = self.network.select(f'target_critic')(batch['next_observations'][..., -1, :], actions=next_actions)
-        if self.config['q_agg'] == 'min':
-            next_q = next_qs.min(axis=0)
-        else:
-            next_q = next_qs.mean(axis=0)
+        next_actions_policy = self.sample_actions(
+            batch['next_observations'][..., -1, :], 
+            rng=sample_rng
+        )
+        next_qs_policy = self.network.select(f'target_critic')(
+            batch['next_observations'][..., -1, :], 
+            actions=next_actions_policy
+        )
         
-        target_q = batch['rewards'][..., -1] + \
-            (self.config['discount'] ** self.config["horizon_length"]) * batch['masks'][..., -1] * next_q
+        # ===== PTR: SARSA target (trajectory's actual next action) =====
+        use_weighted_target = self.config.get('use_weighted_target', False)
 
-        q = self.network.select('critic')(batch['observations'], actions=batch_actions, params=grad_params)
+        if use_weighted_target:
+            beta = self.config.get('beta', 0.5)
+
+            if self.config["action_chunking"]:
+                # next_actions: (B, H, act_dim)  →  (B, H*act_dim)
+                next_actions_traj = batch['next_actions'].reshape(
+                    batch['next_actions'].shape[0], -1
+                )
+            else:
+                # non-chunk: 첫 step만 사용
+                next_actions_traj = batch['next_actions'][..., 0, :]
+
+            next_qs_sarsa = self.network.select('target_critic')(
+                batch['next_observations'][..., -1, :],
+                actions=next_actions_traj,
+            )
+
+            # Q ensemble aggregation
+            if self.config['q_agg'] == 'min':
+                q_policy = next_qs_policy.min(axis=0)
+                q_sarsa = next_qs_sarsa.min(axis=0)
+            else:
+                q_policy = next_qs_policy.mean(axis=0)
+                q_sarsa = next_qs_sarsa.mean(axis=0)
+
+            # Equation (4): weighted combination
+            next_q = (1.0 - beta) * q_sarsa + beta * q_policy
+        else:
+            if self.config['q_agg'] == 'min':
+                next_q = next_qs_policy.min(axis=0)
+            else:
+                next_q = next_qs_policy.mean(axis=0)
+        
+        # TD target
+        target_q = batch['rewards'][..., -1] + \
+            (self.config['discount'] ** self.config["horizon_length"]) * \
+            batch['masks'][..., -1] * next_q
+        
+        # Q prediction
+        q = self.network.select('critic')(
+            batch['observations'], 
+            actions=batch_actions, 
+            params=grad_params
+        )
         
         critic_loss = (jnp.square(q - target_q) * batch['valid'][..., -1]).mean()
-
+        
         return critic_loss, {
             'critic_loss': critic_loss,
             'q_mean': q.mean(),
-            'q_max': q.max(),
-            'q_min': q.min(),
+            'q_policy': q_policy.mean() if use_weighted_target else 0.0,
+            'q_sarsa': q_sarsa.mean() if use_weighted_target else 0.0,
         }
 
     def actor_loss(self, batch, grad_params, rng):
@@ -159,50 +203,61 @@ class ACFQLAgent(flax.struct.PyTreeNode):
         return agent, jax.tree_util.tree_map(lambda x: x.mean(), infos)
     
     @jax.jit
-    def sample_actions(
-        self,
-        observations,
-        rng=None,
-    ):
-        
+    def sample_actions(self, observations, rng=None):
+        # 1) rng 기본값
+        if rng is None:
+            rng = self.rng
+
+        # 2) 단일 obs인지 확인해서 batch dim 붙이기
+        ob_dims = tuple(self.config['ob_dims'])
+        added_batch = False
+
+        if observations.ndim == len(ob_dims):
+            observations = observations[None, ...]  # (1, obs_dim...) 으로 만들기
+            added_batch = True
+
+        batch_size = observations.shape[0]
+        action_dim = self.config['action_dim'] * (
+            self.config['horizon_length'] if self.config["action_chunking"] else 1
+        )
+
         if self.config["actor_type"] == "distill-ddpg":
             noises = jax.random.normal(
                 rng,
-                (
-                    *observations.shape[: -len(self.config['ob_dims'])],  # batch_size
-                    self.config['action_dim'] * \
-                        (self.config['horizon_length'] if self.config["action_chunking"] else 1),
-                ),
+                (batch_size, action_dim)
             )
-            actions = self.network.select(f'actor_onestep_flow')(observations, noises)
+            actions = self.network.select('actor_onestep_flow')(observations, noises)
             actions = jnp.clip(actions, -1, 1)
 
         elif self.config["actor_type"] == "best-of-n":
-            action_dim = self.config['action_dim'] * \
-                        (self.config['horizon_length'] if self.config["action_chunking"] else 1)
             noises = jax.random.normal(
                 rng,
-                (
-                    *observations.shape[: -len(self.config['ob_dims'])],  # batch_size
-                    self.config["actor_num_samples"], action_dim
-                ),
+                (batch_size, self.config["actor_num_samples"], action_dim)
             )
-            observations = jnp.repeat(observations[..., None, :], self.config["actor_num_samples"], axis=-2)
-            actions = self.compute_flow_actions(observations, noises)
-            actions = jnp.clip(actions, -1, 1)
-            if self.config["q_agg"] == "mean":
-                q = self.network.select("critic")(observations, actions).mean(axis=0)
-            else:
-                q = self.network.select("critic")(observations, actions).min(axis=0)
-            indices = jnp.argmax(q, axis=-1)
+            obs_rep = jnp.repeat(
+                observations[:, None, :],
+                self.config["actor_num_samples"],
+                axis=1
+            )
 
-            bshape = indices.shape
-            indices = indices.reshape(-1)
-            bsize = len(indices)
-            actions = jnp.reshape(actions, (-1, self.config["actor_num_samples"], action_dim))[jnp.arange(bsize), indices, :].reshape(
-                bshape + (action_dim,))
+            actions = self.compute_flow_actions(obs_rep, noises)
+            actions = jnp.clip(actions, -1, 1)
+
+            qs = self.network.select("critic")(obs_rep, actions)
+            if self.config["q_agg"] == "mean":
+                q = qs.mean(axis=0)
+            else:
+                q = qs.min(axis=0)
+            idx = jnp.argmax(q, axis=-1)
+            actions = actions[jnp.arange(batch_size), idx]
+
+        # 3) single obs였으면 다시 batch 축 제거
+        if added_batch:
+            actions = actions[0]
 
         return actions
+
+
 
     @jax.jit
     def compute_flow_actions(
@@ -242,7 +297,12 @@ class ACFQLAgent(flax.struct.PyTreeNode):
         rng, init_rng = jax.random.split(rng, 2)
 
         ex_times = ex_actions[..., :1]
-        ob_dims = ex_observations.shape
+        # ob_dims = ex_observations.shape
+        if ex_observations.ndim > 1:
+            ob_dims = ex_observations.shape[1:]   # (obs_dim,) or (H, W, C)
+        else:
+            ob_dims = ex_observations.shape
+
         action_dim = ex_actions.shape[-1]
         if config["action_chunking"]:
             full_actions = jnp.concatenate([ex_actions] * config["horizon_length"], axis=-1)
@@ -340,6 +400,10 @@ def get_config():
             use_fourier_features=False,
             fourier_feature_dim=64,
             weight_decay=0.,
+
+            use_weighted_target=False,  # whether to use PTR weighted target
+            beta=0.5,  # for PTR weighted target
+
         )
     )
     return config

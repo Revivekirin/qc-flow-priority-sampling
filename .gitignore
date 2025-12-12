@@ -8,3 +8,6 @@ dist/
 .idea/
 .ruff_cache/
 exp/
+*.err
+*.out
+*.png
