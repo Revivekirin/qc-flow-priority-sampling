@@ -10,4 +10,4 @@ dist/
 exp/
 *.err
 *.out
-*.png
+traj_*.png
