@@ -12,3 +12,4 @@ exp/
 *.out
 traj_*.png
 plot/
+csv/

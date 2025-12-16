@@ -227,7 +227,7 @@ class ClusterBalancedSampler:
 
         return np.array(traj_ids, dtype=np.int32)
 
-    def sample_sequence(self, dataset, batch_size, seq_len, discount):
+    def sample_sequence(self, dataset, batch_size, seq_len, discount, return_ids=True):
         traj_ids = self.sample_traj_ids(batch_size)
         starts = []
         for tid in traj_ids:
@@ -238,7 +238,12 @@ class ClusterBalancedSampler:
             else:
                 starts.append(np.random.randint(s, max_s + 1))
 
-        return dataset.sample_sequence_from_start_idxs(starts, seq_len, discount)
+        batch = dataset.sample_sequence_from_start_idxs(starts, seq_len, discount)
+        if return_ids:
+            batch = dict(batch)
+            batch["traj_ids"] = traj_ids
+            batch["cluster_ids"] = self.cluster_ids[traj_ids]
+        return batch
 
 
 # ============================================================================
@@ -307,7 +312,6 @@ def main(_):
 
     train_dataset = process_train_dataset(train_dataset)
 
-    # ✅ offline dataset에 is_success 필드 추가 (전부 0)
     d = dict(train_dataset)
     if "is_success" not in d:
         d["is_success"] = np.zeros_like(d["terminals"], dtype=np.float32)
@@ -369,9 +373,8 @@ def main(_):
 
     # K, table = auto_select_k_kmeans(X_scaled)
     k_candidates = list(range(5, 10))
-    # K = select_k_by_value_homogeneity(X_scaled, traj_returns, k_candidates)
-    K=5
-    print("best_k:", K)
+    K = select_k_by_value_homogeneity(X_scaled, traj_returns, k_candidates)
+    print(f"Selected K for clustering: {K}")
     
     kmeans = KMeans(n_clusters=K, random_state=0)
     cluster_ids = kmeans.fit_predict(X_scaled) 
@@ -400,8 +403,9 @@ def main(_):
                 "ret_mean": float(returns_c.mean()),
             }
         )
-        #TODO: cluster stats 활용
-    
+    print("Cluster stats:")
+    wandb.log({"cluster/stats": wandb.Table(data=cluster_stats)})
+
     # Initialize Custersampler
     cluster_sampler = ClusterBalancedSampler(
         cluster_ids=cluster_ids,
@@ -443,12 +447,45 @@ def main(_):
                 config["batch_size"],
                 FLAGS.horizon_length,
                 FLAGS.discount,
+                return_ids=True
             )
         else:
             batch = train_dataset.sample_sequence(
                     config["batch_size"],
                     FLAGS.horizon_length,
                     FLAGS.discount,
+                )
+
+        # ============================================================
+        # Cluster sampling statistics (offline only)
+        # ============================================================
+        if FLAGS.cluster_sampler and "cluster_ids" in batch:
+            cids = np.asarray(batch["cluster_ids"])
+            counts = np.bincount(cids, minlength=cluster_sampler.K)
+            probs = counts / np.maximum(1, counts.sum())
+
+            eps = 1e-12
+            entropy = float(-(probs * np.log(probs + eps)).sum())
+            kl_u = float(
+                (probs * (np.log(probs + eps) - np.log(1.0 / cluster_sampler.K))).sum()
+            )
+            ess = float(1.0 / (np.sum(probs ** 2) + eps))
+
+            wandb.log(
+                {
+                    "cluster/offline/prob_entropy": entropy,
+                    "cluster/offline/kl_to_uniform": kl_u,
+                    "cluster/offline/ess": ess,
+                    "cluster/offline/count_min": int(counts.min()),
+                    "cluster/offline/count_max": int(counts.max()),
+                },
+                step=step,
+            )
+
+            for k in range(cluster_sampler.K):
+                wandb.log(
+                    {f"cluster/offline/prob_{k}": float(probs[k])},
+                    step=step,
                 )
 
         agent, info = agent.update(batch)
@@ -563,31 +600,6 @@ def main(_):
         current_traj.append(transition)
         ob = next_ob
 
-        # End of episode
-        # if done:
-        #     online_episode_count += 1
-        #     success = any(t["rewards"] >= -0.5 for t in current_traj)
-        #     if success:
-        #         online_success_count += 1
-
-        #     if FLAGS.use_ptr_online_priority and ptr_sampler is not None:
-        #         N = replay_buffer.size
-        #         rewards_source = replay_buffer["rewards"][:N]
-        #         new_terminal_locs = np.nonzero(
-        #             replay_buffer["terminals"][:N] > 0
-        #         )[0]
-        #         new_initial_locs = np.concatenate(
-        #             [[0], new_terminal_locs[:-1] + 1]
-        #         )
-        #         new_boundaries = list(zip(new_initial_locs, new_terminal_locs))
-        #         ptr_sampler.update_online(
-        #             rewards_source=rewards_source,
-        #             trajectory_boundaries=new_boundaries,
-        #         )
-
-        #     current_traj = []
-        #     ob, _ = env.reset()
-        #     action_queue = []
         if done:
             online_episode_count += 1
 
