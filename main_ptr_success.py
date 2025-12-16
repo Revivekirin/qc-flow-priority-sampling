@@ -19,7 +19,7 @@ from envs.robomimic_utils import is_robomimic_env
 from evaluation import evaluate
 from log_utils import CsvLogger, get_exp_name, get_flag_dict, setup_wandb
 from utils.flax_utils import save_agent
-from utils.datasets_logging import Dataset, ReplayBuffer, PriorityTrajectorySampler
+from utils.datasets_success import Dataset, ReplayBuffer, PriorityTrajectorySampler
 
 from cluster_vis import build_traj_features, plot_elbow, visualize_traj_clusters, auto_select_k_kmeans, select_k_by_value_homogeneity
 from sklearn.preprocessing import StandardScaler
@@ -140,6 +140,9 @@ def sample_sequence_PTR(
     for i, tid in enumerate(traj_ids):
         start, end = boundaries[tid]
         traj_len = end - start + 1
+        if traj_len < seq_len:
+            start_idxs[i] = np.random.randint(0, dataset.size - seq_len + 1)
+            continue
         if backward:
             if traj_len >= seq_len:
                 s = end - seq_len + 1 
@@ -304,11 +307,16 @@ def main(_):
 
     train_dataset = process_train_dataset(train_dataset)
 
-    # Build Replay buffer (offline + online)
+    # ✅ offline dataset에 is_success 필드 추가 (전부 0)
+    d = dict(train_dataset)
+    if "is_success" not in d:
+        d["is_success"] = np.zeros_like(d["terminals"], dtype=np.float32)
+
     replay_buffer = ReplayBuffer.create_from_initial_dataset(
-        dict(train_dataset),
+        d,
         size=max(FLAGS.buffer_size, train_dataset.size + 1),
     )
+
 
     # PTR Initialization
     (terminal_locs,) = np.nonzero(train_dataset["terminals"] > 0)
@@ -334,14 +342,25 @@ def main(_):
     # Create PTR Sampler
     ptr_sampler = None
     if FLAGS.use_ptr_backward:
+        # ptr_sampler = PriorityTrajectorySampler(
+        #     trajectory_boundaries=trajectory_boundaries,
+        #     rewards_source=train_dataset["rewards"],
+        #     metric=FLAGS.metric,
+        #     temperature=1.0,
+        # )
         ptr_sampler = PriorityTrajectorySampler(
             trajectory_boundaries=trajectory_boundaries,
-            rewards_source=train_dataset["rewards"],
+            rewards_source=replay_buffer["rewards"], 
+            success_source=replay_buffer["is_success"], 
             metric=FLAGS.metric,
             temperature=1.0,
         )
 
-    
+    ptr_sampler.num_offline_traj = len(trajectory_boundaries)
+
+    # online boundary 기록용
+    online_ep_start = replay_buffer.pointer
+
     # Cluster Initialization
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(features).astype(np.float64)  
@@ -350,7 +369,8 @@ def main(_):
 
     # K, table = auto_select_k_kmeans(X_scaled)
     k_candidates = list(range(5, 10))
-    K = select_k_by_value_homogeneity(X_scaled, traj_returns, k_candidates)
+    # K = select_k_by_value_homogeneity(X_scaled, traj_returns, k_candidates)
+    K=5
     print("best_k:", K)
     
     kmeans = KMeans(n_clusters=K, random_state=0)
@@ -450,6 +470,22 @@ def main(_):
     # ============================================================================
     # ONLINE RL
     # ============================================================================
+    d = dict(train_dataset)
+    if "is_success" not in d:
+        d["is_success"] = np.zeros_like(d["terminals"], dtype=np.float32)
+    for k, v in d.items():
+        a = np.asarray(v)
+        print(k, "dtype", a.dtype, "ndim", a.ndim, "shape", getattr(a, "shape", None))
+        if a.ndim == 0:
+            print("  >>> [BAD] scalar detected:", k, a)
+
+    buffer_size = max(FLAGS.buffer_size, len(d["rewards"]) + 1)
+    replay_buffer = ReplayBuffer.create_from_initial_dataset(
+        d,
+        size=buffer_size,
+    )
+
+
     ob, _ = env.reset()
     action_queue = []
     current_traj = []
@@ -501,6 +537,17 @@ def main(_):
             state_log["qvel"].append(np.copy(state["qvel"]))
             if "button_states" in state:
                 state_log["button_states"].append(np.copy(state["button_states"]))
+        
+        if "success" in info and isinstance(info["success"], (int, float, bool, np.number)):
+            is_success = float(info["success"])
+        elif "is_success" in info:
+            s = info["is_success"]
+            if isinstance(s, dict):
+                is_success = float(any(bool(v) for v in s.values()))
+            else:
+                is_success = float(s)
+        else:
+            is_success = 0.0
 
         transition = dict(
             observations=ob,
@@ -509,6 +556,7 @@ def main(_):
             terminals=float(done),
             masks=1.0 - float(terminated),
             next_observations=next_ob,
+            is_success=is_success,
         )
 
         replay_buffer.add_transition(transition)
@@ -516,30 +564,65 @@ def main(_):
         ob = next_ob
 
         # End of episode
+        # if done:
+        #     online_episode_count += 1
+        #     success = any(t["rewards"] >= -0.5 for t in current_traj)
+        #     if success:
+        #         online_success_count += 1
+
+        #     if FLAGS.use_ptr_online_priority and ptr_sampler is not None:
+        #         N = replay_buffer.size
+        #         rewards_source = replay_buffer["rewards"][:N]
+        #         new_terminal_locs = np.nonzero(
+        #             replay_buffer["terminals"][:N] > 0
+        #         )[0]
+        #         new_initial_locs = np.concatenate(
+        #             [[0], new_terminal_locs[:-1] + 1]
+        #         )
+        #         new_boundaries = list(zip(new_initial_locs, new_terminal_locs))
+        #         ptr_sampler.update_online(
+        #             rewards_source=rewards_source,
+        #             trajectory_boundaries=new_boundaries,
+        #         )
+
+        #     current_traj = []
+        #     ob, _ = env.reset()
+        #     action_queue = []
         if done:
             online_episode_count += 1
-            success = any(t["rewards"] >= -0.5 for t in current_traj)
-            if success:
+
+            # (선택) 성공 카운트는 info 기반이 더 안전
+            if is_success > 0.5:
                 online_success_count += 1
 
             if FLAGS.use_ptr_online_priority and ptr_sampler is not None:
-                N = replay_buffer.size
-                rewards_source = replay_buffer["rewards"][:N]
-                new_terminal_locs = np.nonzero(
-                    replay_buffer["terminals"][:N] > 0
-                )[0]
-                new_initial_locs = np.concatenate(
-                    [[0], new_terminal_locs[:-1] + 1]
-                )
-                new_boundaries = list(zip(new_initial_locs, new_terminal_locs))
-                ptr_sampler.update_online(
-                    rewards_source=rewards_source,
-                    trajectory_boundaries=new_boundaries,
-                )
+                # ✅ 방금 추가한 transition의 index = pointer - 1
+                ep_end = (replay_buffer.pointer - 1) % replay_buffer.max_size
+
+                # wrap이 아직 없다고 했으니 보통 ep_end >= online_ep_start 이어야 함
+                if ep_end >= online_ep_start:
+                    ptr_sampler.trajectory_boundaries.append((online_ep_start, ep_end))
+                else:
+                    # wrap 발생: 안전하게 skip
+                    # (버퍼 충분히 크면 사실상 안 나와야 정상)
+                    pass
+
+                # 다음 episode 시작 인덱스 갱신
+                online_ep_start = replay_buffer.pointer
+
+                # ✅ sampler가 보는 rewards_source / success_source를 replay_buffer로 유지
+                ptr_sampler.rewards_source = replay_buffer["rewards"]
+                if hasattr(ptr_sampler, "success_source"):
+                    ptr_sampler.success_source = replay_buffer["is_success"]
+
+                # ✅ stats/priorities 재계산
+                ptr_sampler._compute_basic_stats()
+                ptr_sampler.compute_priorities()
 
             current_traj = []
             ob, _ = env.reset()
             action_queue = []
+
 
         # Online Training
         if step >= FLAGS.start_training:
@@ -582,17 +665,20 @@ def main(_):
                 and FLAGS.metric == "td_error_rank"
                 and "traj_ids" in batch              
             ):
-                td_err = np.asarray(info["critic/td_error_per_sample"])
-                traj_ids = np.asarray(batch["traj_ids"])
-                
-                td_err_flat = td_err.reshape(-1)
-                traj_ids_flat = traj_ids.reshape(-1)
+                td_err = np.asarray(info["critic/td_error_per_sample"])   # (utd,B,H) or (utd,B)
+                traj_ids = np.asarray(batch["traj_ids"])                  # (utd,B)
+
+                if td_err.ndim == 3:
+                    td_err = np.max(np.abs(td_err), axis=-1)  # (utd,B)  or mean/median도 가능
+                else:
+                    td_err = np.abs(td_err)
 
                 ptr_sampler.update_td_error_from_batch(
-                    traj_ids=traj_ids_flat,
-                    td_errors=td_err_flat,
+                    traj_ids=traj_ids.reshape(-1),
+                    td_errors=td_err.reshape(-1),
                     ema_beta=0.9,
                 )
+                ptr_sampler.compute_priorities()
 
             logger.log(info, "online_agent", step=global_step)
 

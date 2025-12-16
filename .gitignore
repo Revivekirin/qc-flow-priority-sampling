@@ -11,3 +11,4 @@ exp/
 *.err
 *.out
 traj_*.png
+plot/

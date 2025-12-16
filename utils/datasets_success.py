@@ -371,7 +371,9 @@ class ReplayBuffer(Dataset):
 
         jax.tree_util.tree_map(set_idx, self._dict, transition)
         self.pointer = (self.pointer + 1) % self.max_size
-        self.size = max(self.size, self.pointer)
+        # self.size = max(self.size, self.pointer)
+        self.size = min(self.max_size, self.size + 1)
+
 
     def clear(self):
         """Clear the replay buffer."""
@@ -445,6 +447,7 @@ class PriorityTrajectorySampler:
         trajectory_boundaries,
         rewards_source,
         metric="success_binary",
+        success_source=None,   
         temperature=1.0,
         alpha_rank=0.7,      # rank exponent (lower → more uniform)
         eps_uniform=0.05,    # exploration mixing
@@ -463,6 +466,11 @@ class PriorityTrajectorySampler:
 
         # TD-error statistics
         self.td_error_mean = None  
+        self.num_offline_traj = 0
+        self.rewards_source = np.asarray(rewards_source)
+        self.success_source = None if success_source is None else np.asarray(success_source)
+
+
         # Build basic statistics (success flags, rewards per traj)
         self._compute_basic_stats()
 
@@ -491,7 +499,18 @@ class PriorityTrajectorySampler:
         for start, end in self.trajectory_boundaries:
             r = self.rewards_source[start:end+1]
             self.rewards_per_traj.append(r)
-            self.success_flags.append(np.any(r >= -0.5))
+
+            if self.success_source is not None:
+                s = self.success_source[start:end+1]
+                self.success_flags.append(np.any(s > 0.5))
+            else:
+                self.success_flags.append(np.any(r >= -0.5))  # fallback for robomimic
+
+
+        # for start, end in self.trajectory_boundaries:
+        #     r = self.rewards_source[start:end+1]
+        #     self.rewards_per_traj.append(r)
+        #     self.success_flags.append(np.any(r >= -0.5))
 
         self.success_flags = np.asarray(self.success_flags, dtype=bool)
 
@@ -524,7 +543,7 @@ class PriorityTrajectorySampler:
             if old == 0.0:
                 new_val = float(delta)
             else:
-                new_val = ema_beta * old + (1.0 - ema_beta) * float(delta)
+                new_val = ema_beta * old + (1.0 - ema_beta) * abs(delta)
             self.td_error_mean[tid] = new_val
 
     # score -> rank-based priority
@@ -658,15 +677,16 @@ class PriorityTrajectorySampler:
     # ================================================================
     # Update sampler when online buffer grows
     # ================================================================
-    def update_online(self, rewards_source, trajectory_boundaries):
+    def update_online(self, rewards_source, trajectory_boundaries, success_source=None):
         self.rewards_source = np.asarray(rewards_source)
         self.trajectory_boundaries = trajectory_boundaries
 
-        # preserve td_error_mean
-        self._compute_basic_stats()
+        if success_source is not None:
+            self.success_source = np.asarray(success_source)
 
-        # recompute priorities after growth
+        self._compute_basic_stats()
         self.compute_priorities()
+
 
 
 # def get_group_weights(step, T_curr):

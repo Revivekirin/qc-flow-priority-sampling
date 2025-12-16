@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=qc
-#SBATCH --nodelist=pat-t5
+#SBATCH --nodelist=pat-t3
 #SBATCH --output=log_rl_%j.out
 #SBATCH --error=log_rl_%j.err
 #SBATCH --gres=gpu:1
@@ -73,8 +73,36 @@
 #   --backward=False \
 #   --use_weighted_target=False \
 
-MUJOCO_GL=egl python main_ptr_logging.py \
-  --env_name=square-mh-low \
+# MUJOCO_GL=egl python main_ptr_logging.py \
+#   --env_name=square-mh-low \
+#   --use_ptr_backward=True \
+#   --use_ptr_online_priority=True \
+#   --sparse=False \
+#   --agent.alpha=100 \
+#   --horizon_length=5 \
+#   --metric=success_binary \
+#   --backward=False \
+#   --use_weighted_target=False \
+#   --cluster_sampler=True \
+#   --cluster_sampler=True \
+#   --cluster_use_curriculum=True \
+#   --cluster_curriculum_steps=200000
+
+# MUJOCO_GL=egl python main_ptr_logging.py \
+#   --env_name=square-mh-low \
+#   --use_ptr_backward=True \
+#   --use_ptr_online_priority=True \
+#   --sparse=False \
+#   --agent.alpha=100 \
+#   --horizon_length=5 \
+#   --metric=success_binary \
+#   --backward=False \
+#   --use_weighted_target=False \
+#   --cluster_sampler=True \
+#   --entity=sophia435256-robros
+
+MUJOCO_GL=egl python main_ptr_success.py \
+  --env_name=transport-mh-low \
   --use_ptr_backward=True \
   --use_ptr_online_priority=True \
   --sparse=False \
@@ -83,7 +111,5 @@ MUJOCO_GL=egl python main_ptr_logging.py \
   --metric=success_binary \
   --backward=False \
   --use_weighted_target=False \
-  --cluster_sampler=True \
-  --cluster_sampler=True \
-  --cluster_use_curriculum=True \
-  --cluster_curriculum_steps=200000
+  --cluster_sampler=False \
+  --entity=sophia435256-robros \

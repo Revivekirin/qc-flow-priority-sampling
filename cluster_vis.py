@@ -1,10 +1,14 @@
 import numpy as np
+import matplotlib.pyplot as plt
 from typing import List, Tuple, Optional, Dict
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
-from sklearn.cluster import KMeans, SpectralClustering   # Spectral 추가
-from sklearn.mixture import GaussianMixture              # GMM 추가
+from sklearn.cluster import KMeans, SpectralClustering   
+from sklearn.mixture import GaussianMixture          
+from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
+
+import hdbscan
 
 def build_traj_features(
     dataset: Dict[str, np.ndarray],
@@ -14,60 +18,54 @@ def build_traj_features(
     k_keyframes: int = 20,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Trajectory-level feature를 만드는 함수.
-    길이 + downsample된 경로 + 속도통계로 feature 벡터를 구성한다.
+    Build trajectory-level features from dataset.
+    Constructs feature vectors using trajectory length, downsampled keyframes, and velocity statistics.
 
     Args:
         dataset:
-            {"observations": np.ndarray, ...} 형태의 dict 또는 Dataset-like 객체.
-            dataset[obs_key] 의 shape은 (N, obs_dim...) 이라고 가정.
+            Dictionary containing observations, e.g., {"observations": np.ndarray, ...}
+            dataset[obs_key] should have shape (N, obs_dim...)
         trajectory_boundaries:
-            [(start0, end0), (start1, end1), ...] 형태의 리스트.
+            List of trajectory boundaries in the form [(start0, end0), (start1, end1), ...]
         obs_key:
-            경로를 추출할 관측 key 이름 (기본: "observations").
-            예: "ee_pos", "qpos", "observations" 등.
+            Key name for extracting observations (default: "observations")
+            Examples: "ee_pos", "qpos", "observations"
         obs_slice:
-            관측 벡터에서 일부 차원만 쓰고 싶을 때 사용.
-            예: obs_slice = slice(0, 3)  → obs[..., :3] 만 사용 (EE pos).
-            None이면 전체 obs 사용.
+            Slice to use only specific dimensions from observation vector
+            Example: obs_slice = slice(0, 3) → uses only obs[..., :3] (e.g., EE position)
+            If None, uses full observation
         k_keyframes:
-            각 traj에서 균일하게 뽑을 keyframe 개수.
+            Number of keyframes to uniformly sample from each trajectory
 
     Returns:
-        features: shape (num_traj, D) 의 feature matrix.
-        lengths:  shape (num_traj,) 의 trajectory 길이 배열.
+        features: Feature matrix of shape (num_traj, D)
+        lengths:  Array of trajectory lengths with shape (num_traj,)
     """
     obs = np.asarray(dataset[obs_key])
     if obs_slice is not None:
-        obs = obs[..., obs_slice]   # 예: (N, 3)
+        obs = obs[..., obs_slice]
 
     num_traj = len(trajectory_boundaries)
     features = []
     lengths = []
 
     for (s, e) in trajectory_boundaries:
-        # 1) 길이
         T = int(e - s + 1)
         lengths.append(T)
 
-        # trajectory 길이가 너무 짧으면 (예: single step) 스킵 or 최소 보정
         if T <= 1:
-            # padding 비슷하게: 같은 obs를 반복
             idx = np.array([s] * k_keyframes, dtype=int)
         else:
-            # 2) 균일하게 k_keyframes 개 index 뽑기
             idx = np.linspace(s, e, k_keyframes, dtype=int)
 
-        pts = obs[idx]                   # (K, obs_dim...)
-        pts_flat = pts.reshape(k_keyframes, -1)  # (K, D_obs)
+        pts = obs[idx]
+        pts_flat = pts.reshape(k_keyframes, -1)
 
-        # 3) 속도 norm 통계 (각 step의 L2 norm)
-        v = np.diff(pts_flat, axis=0)          # (K-1, D_obs)
-        v_norm = np.linalg.norm(v, axis=-1)    # (K-1,)
+        v = np.diff(pts_flat, axis=0)
+        v_norm = np.linalg.norm(v, axis=-1)
         v_mean = float(v_norm.mean()) if v_norm.size > 0 else 0.0
         v_std  = float(v_norm.std())  if v_norm.size > 0 else 0.0
 
-        # 4) feature vector: [T, v_mean, v_std, flattened keyframes]
         feat = np.concatenate([
             np.array([T, v_mean, v_std], dtype=np.float32),
             pts_flat.flatten().astype(np.float32),
@@ -79,14 +77,6 @@ def build_traj_features(
 
     return features, lengths
 
-import matplotlib.pyplot as plt
-import numpy as np
-
-# X_pca: shape (num_traj, 2)
-# cluster_ids: shape (num_traj,)
-
-import numpy as np
-import matplotlib.pyplot as plt
 
 def visualize_traj_clusters(
     X_pca,
@@ -96,26 +86,24 @@ def visualize_traj_clusters(
     noise_label=-1,
 ):
     """
-    X_pca      : (N, 2) PCA 결과
-    cluster_ids: (N,) 클러스터 라벨 (KMeans의 labels_ 또는 HDBSCAN의 labels_)
-    lengths    : (N,) trajectory 길이 (옵션)
-    noise_label: HDBSCAN noise 라벨 (기본 -1, KMeans면 무시됨)
+    Visualize trajectory clusters in PCA space.
+    
+    Args:
+        X_pca: PCA results with shape (N, 2)
+        cluster_ids: Cluster labels with shape (N,) (from KMeans or HDBSCAN)
+        lengths: Optional trajectory lengths with shape (N,)
+        save_prefix: Prefix for saved figure filenames
+        noise_label: Label for noise points (default -1, ignored for KMeans)
     """
-
     cluster_ids = np.asarray(cluster_ids)
     unique_labels = np.unique(cluster_ids)
 
-    # HDBSCAN의 noise(-1)를 따로 분리
     has_noise = noise_label in unique_labels
     non_noise_mask = cluster_ids != noise_label
     noise_mask = cluster_ids == noise_label
 
-    # -----------------------------
-    # 1) 클러스터 결과 시각화
-    # -----------------------------
     plt.figure(figsize=(8, 6))
 
-    # non-noise 포인트
     scatter = plt.scatter(
         X_pca[non_noise_mask, 0],
         X_pca[non_noise_mask, 1],
@@ -125,7 +113,6 @@ def visualize_traj_clusters(
     )
     cbar = plt.colorbar(scatter, label="Cluster ID")
 
-    # noise 포인트는 회색으로 별도 표시
     if has_noise:
         plt.scatter(
             X_pca[noise_mask, 0],
@@ -141,12 +128,9 @@ def visualize_traj_clusters(
     plt.xlabel("PCA 1")
     plt.ylabel("PCA 2")
     plt.tight_layout()
-    plt.savefig(f"{save_prefix}_cluster.png", dpi=200)
+    plt.savefig(f"plot/{save_prefix}_cluster.png", dpi=200)
     plt.close()
 
-    # -----------------------------
-    # 2) 길이 기반 시각화
-    # -----------------------------
     if lengths is not None:
         plt.figure(figsize=(8, 6))
         scatter = plt.scatter(
@@ -161,13 +145,9 @@ def visualize_traj_clusters(
         plt.xlabel("PCA 1")
         plt.ylabel("PCA 2")
         plt.tight_layout()
-        plt.savefig(f"{save_prefix}_length.png", dpi=200)
+        plt.savefig(f"plot/{save_prefix}_length.png", dpi=200)
         plt.close()
 
-    # -----------------------------
-    # 3) cluster별 centroid 시각화
-    #    (noise는 centroid에서 제외)
-    # -----------------------------
     valid_labels = unique_labels[unique_labels != noise_label]
     centroids = []
 
@@ -180,7 +160,6 @@ def visualize_traj_clusters(
     centroids = np.array(centroids)
 
     plt.figure(figsize=(8, 6))
-    # 전체 포인트 (noise 포함)
     plt.scatter(
         X_pca[non_noise_mask, 0],
         X_pca[non_noise_mask, 1],
@@ -198,7 +177,6 @@ def visualize_traj_clusters(
             alpha=0.5,
         )
 
-    # centroid만 검은 X로 표시
     if len(centroids) > 0:
         plt.scatter(
             centroids[:, 0],
@@ -214,7 +192,7 @@ def visualize_traj_clusters(
     plt.xlabel("PCA 1")
     plt.ylabel("PCA 2")
     plt.tight_layout()
-    plt.savefig(f"{save_prefix}_centroids.png", dpi=200)
+    plt.savefig(f"plot/{save_prefix}_centroids.png", dpi=200)
     plt.close()
 
     print(f"[Saved] {save_prefix}_cluster.png")
@@ -223,14 +201,14 @@ def visualize_traj_clusters(
     print(f"[Saved] {save_prefix}_centroids.png")
 
 
-import numpy as np
-from sklearn.cluster import KMeans
-import matplotlib.pyplot as plt
-
 def plot_elbow(X, k_min=2, k_max=16, save_path="traj_pca_elbow.png"):
     """
-    X: (N, D) feature (X_scaled 추천)
-    k_min, k_max: 탐색할 K 범위
+    Plot elbow curve for KMeans clustering.
+    
+    Args:
+        X: Feature matrix with shape (N, D) (scaled features recommended)
+        k_min, k_max: Range of K values to explore
+        save_path: Path to save the elbow plot
     """
     Ks = list(range(k_min, k_max + 1))
     inertias = []
@@ -239,9 +217,8 @@ def plot_elbow(X, k_min=2, k_max=16, save_path="traj_pca_elbow.png"):
         print(f"[Elbow] Fitting KMeans with K={K} ...")
         kmeans = KMeans(n_clusters=K, random_state=0, n_init="auto")
         kmeans.fit(X)
-        inertias.append(kmeans.inertia_)   # 각 클러스터 내 제곱합(SSE)
+        inertias.append(kmeans.inertia_)
 
-    # --- Plot ---
     plt.figure(figsize=(8, 5))
     plt.plot(Ks, inertias, marker="o")
     plt.xlabel("Number of clusters K")
@@ -257,86 +234,175 @@ def plot_elbow(X, k_min=2, k_max=16, save_path="traj_pca_elbow.png"):
     print("Inertias:", inertias)
     return Ks, inertias
 
+
+def select_k_elbow(Ks, inertias):
+    """
+    Select optimal K using second-order differences (curvature).
+    
+    Args:
+        Ks: Array of K values
+        inertias: Corresponding inertia values
+        
+    Returns:
+        best_k: Optimal number of clusters based on elbow point
+    """
+    inertias = np.array(inertias)
+    Ks = np.array(Ks)
+
+    d1 = np.diff(inertias)
+    d2 = np.diff(d1)
+
+    elbow_idx = np.argmin(d2)
+    best_k = Ks[elbow_idx + 2]
+    return int(best_k)
+
+
+def auto_select_k_kmeans(
+    X, k_min=2, k_max=20, random_state=0, n_init=20,
+    top_frac=0.20, k_floor=4
+):
+    """
+    Automatically select optimal K for KMeans using silhouette score.
+    
+    Args:
+        X: Feature matrix
+        k_min, k_max: Range of K values to test
+        random_state: Random seed for reproducibility
+        n_init: Number of KMeans initializations
+        top_frac: Fraction of top silhouette scores to consider
+        k_floor: Minimum acceptable K value
+        
+    Returns:
+        best_k: Selected optimal K
+        rows: Array containing evaluation metrics for all K values
+    """
+    rows = []
+    for K in range(k_min, k_max+1):
+        km = KMeans(n_clusters=K, random_state=random_state, n_init=n_init)
+        labels = km.fit_predict(X)
+        if len(np.unique(labels)) < 2:
+            continue
+        sil = silhouette_score(X, labels)
+        ch  = calinski_harabasz_score(X, labels)
+        db  = davies_bouldin_score(X, labels)
+        rows.append((K, sil, ch, db, km.inertia_))
+
+    rows = np.array(rows, dtype=object)
+    K_vals = rows[:,0].astype(int)
+    sil = rows[:,1].astype(float)
+
+    thr = np.quantile(sil, 1.0 - top_frac)
+    candidates = K_vals[sil >= thr]
+
+    candidates = candidates[candidates >= k_floor]
+    if len(candidates) == 0:
+        best_k = int(K_vals[np.argmax(sil)])
+    else:
+        best_k = int(candidates.min())
+    return best_k, rows
+
+def select_k_by_value_homogeneity(X, traj_returns, k_candidates):
+    """
+    traj_returns: offline dataset에서 trajectory return / success score
+    """
+    best_k = None
+    best_score = np.inf
+
+    for K in k_candidates:
+        km = KMeans(n_clusters=K, random_state=0, n_init=20)
+        labels = km.fit_predict(X)
+
+        # cluster 내부 return variance 평균
+        var_sum = 0.0
+        for c in range(K):
+            r = traj_returns[labels == c]
+            if len(r) > 1:
+                var_sum += np.var(r)
+        var_mean = var_sum / K
+
+        if var_mean < best_score:
+            best_score = var_mean
+            best_k = K
+
+    return best_k
+
+
 if __name__ == '__main__':
     
     train_dataset = ...
     trajectory_boundaries = ...
+    env_name = ...
     
     features, lengths = build_traj_features(train_dataset, trajectory_boundaries,
                                         obs_key="observations",
-                                        obs_slice=None,  # 또는 slice(0, 3)
+                                        obs_slice=None,  
                                         k_keyframes=20)
     
 
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(features).astype(np.float64)  # float64로
-
-    import hdbscan
-    clusterer = hdbscan.HDBSCAN(min_cluster_size=30)
-    labels = clusterer.fit_predict(X_scaled)
-
-    # 시각화용 2D PCA
+    X_scaled = scaler.fit_transform(features).astype(np.float64) 
     pca_2d = PCA(n_components=2, random_state=0)
     X_pca = pca_2d.fit_transform(X_scaled)
 
-    # GMM / Spectral용 약간 더 높은 차원의 PCA (예: 20차원)
-    pca_gmm = PCA(n_components=min(20, X_scaled.shape[1]), random_state=0)
-    X_gmm = pca_gmm.fit_transform(X_scaled)
+    # Elbow method or auto select k means
+    Ks, inertias = plot_elbow(X_scaled, k_min=2, k_max=20, save_path=f"plot/{env_name}_elbow.png")
+    K = select_k_elbow(Ks, inertias) 
+    K, table = auto_select_k_kmeans(X_scaled)
 
+    # K means
+    kmeans = KMeans(n_clusters=K, random_state=0)
+    cluster_ids = kmeans.fit_predict(X_scaled) 
+    visualize_traj_clusters(
+        X_pca,
+        cluster_ids,
+        lengths,
+        save_prefix=f"{env_name}_kmeans"
+    )
+    print(f"kmeans pngs are saved!")
 
-    # features, lengths, X_scaled까지 만든 뒤
-    # Ks, inertias = plot_elbow(X_scaled, k_min=2, k_max=20, save_path="traj_elbow.png")
-    # print("[DEBUG inertials] inertias :", inertias)
-
-    # K=7
-    # kmeans = KMeans(n_clusters=K, random_state=0)
-    # cluster_ids = kmeans.fit_predict(X_scaled) 
-
-    # PCA + 클러스터 결과 시각화 및 저장
+    # HDBSCAN
+    clusterer = hdbscan.HDBSCAN(min_cluster_size=30)
+    labels = clusterer.fit_predict(X_scaled)
     visualize_traj_clusters(
         X_pca, 
         labels, 
         lengths=lengths, 
-        save_prefix=f"traj_pca_hdbscan"
+        save_prefix=f"{env_name}_hdbscan"
     )
     print(f"hdbsan pngs are saved!")
-    # ----------------------------
-    #  추가 1) GMM clustering
-    # ----------------------------
-    K = 7  # elbow 등으로 고른 K 사용
+
+    # GMM
+    pca_gmm = PCA(n_components=min(20, X_scaled.shape[1]), random_state=0)
+    X_gmm = pca_gmm.fit_transform(X_scaled)
     gmm = GaussianMixture(
         n_components=K,
         covariance_type="full",
         random_state=0,
     )
     gmm_labels = gmm.fit_predict(X_scaled)
-
     visualize_traj_clusters(
         X_pca,
         gmm_labels,
         lengths=lengths,
-        save_prefix="traj_pca_gmm_k7",
-        noise_label=-1,   # GMM에는 noise 없음 → 그냥 -1로 두면 자동 무시
+        save_prefix=f"{env_name}_gmm",
+        noise_label=-1, 
     )
     print("GMM pngs are saved!")
 
-    # ----------------------------
-    #  추가 2) Spectral clustering
-    # ----------------------------
+    # Spectral Clustering
     spectral = SpectralClustering(
         n_clusters=K,
         assign_labels="kmeans",
-        affinity="nearest_neighbors",  # trajectory feature라서 NN 기반이 무난
-        n_neighbors=10,                # 필요하면 조정
+        affinity="nearest_neighbors",  
+        n_neighbors=10,               
         random_state=0,
     )
     spectral_labels = spectral.fit_predict(X_scaled)
-
     visualize_traj_clusters(
         X_pca,
         spectral_labels,
         lengths=lengths,
-        save_prefix="traj_pca_spectral_k7",
-        noise_label=-1,   # noise 개념 없음
+        save_prefix=f"{env_name}_gmm_spectral",
+        noise_label=-1, 
     )
     print("Spectral pngs are saved!")
