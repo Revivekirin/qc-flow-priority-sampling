@@ -101,15 +101,15 @@
 #   --cluster_sampler=True \
 #   --entity=sophia435256-robros
 
-MUJOCO_GL=egl python main_ptr_success.py \
-  --env_name=transport-mh-low \
+MUJOCO_GL=egl python debug.py \
+  --env_name=square-mh-low \
   --use_ptr_backward=True \
   --use_ptr_online_priority=True \
   --sparse=False \
   --agent.alpha=100 \
   --horizon_length=5 \
-  --metric=avg_reward\
+  --metric=td_error_rank\
   --backward=False \
   --use_weighted_target=False \
-  --cluster_sampler=False \
+  --cluster_sampler=True \
   --entity=sophia435256-robros \

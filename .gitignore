@@ -13,3 +13,5 @@ exp/
 traj_*.png
 plot/
 csv/
+run.sh
+run_*.sh

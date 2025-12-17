@@ -4,11 +4,12 @@ from typing import List, Tuple, Optional, Dict
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
-from sklearn.cluster import KMeans, SpectralClustering   
-from sklearn.mixture import GaussianMixture          
+from sklearn.cluster import KMeans, SpectralClustering
+from sklearn.mixture import GaussianMixture
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 
 import hdbscan
+
 
 def build_traj_features(
     dataset: Dict[str, np.ndarray],
@@ -17,30 +18,6 @@ def build_traj_features(
     obs_slice: Optional[slice] = None,
     k_keyframes: int = 20,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Build trajectory-level features from dataset.
-    Constructs feature vectors using trajectory length, downsampled keyframes, and velocity statistics.
-
-    Args:
-        dataset:
-            Dictionary containing observations, e.g., {"observations": np.ndarray, ...}
-            dataset[obs_key] should have shape (N, obs_dim...)
-        trajectory_boundaries:
-            List of trajectory boundaries in the form [(start0, end0), (start1, end1), ...]
-        obs_key:
-            Key name for extracting observations (default: "observations")
-            Examples: "ee_pos", "qpos", "observations"
-        obs_slice:
-            Slice to use only specific dimensions from observation vector
-            Example: obs_slice = slice(0, 3) → uses only obs[..., :3] (e.g., EE position)
-            If None, uses full observation
-        k_keyframes:
-            Number of keyframes to uniformly sample from each trajectory
-
-    Returns:
-        features: Feature matrix of shape (num_traj, D)
-        lengths:  Array of trajectory lengths with shape (num_traj,)
-    """
     obs = np.asarray(dataset[obs_key])
     if obs_slice is not None:
         obs = obs[..., obs_slice]
@@ -64,7 +41,7 @@ def build_traj_features(
         v = np.diff(pts_flat, axis=0)
         v_norm = np.linalg.norm(v, axis=-1)
         v_mean = float(v_norm.mean()) if v_norm.size > 0 else 0.0
-        v_std  = float(v_norm.std())  if v_norm.size > 0 else 0.0
+        v_std = float(v_norm.std()) if v_norm.size > 0 else 0.0
 
         feat = np.concatenate([
             np.array([T, v_mean, v_std], dtype=np.float32),
@@ -85,16 +62,6 @@ def visualize_traj_clusters(
     save_prefix="traj_pca",
     noise_label=-1,
 ):
-    """
-    Visualize trajectory clusters in PCA space.
-    
-    Args:
-        X_pca: PCA results with shape (N, 2)
-        cluster_ids: Cluster labels with shape (N,) (from KMeans or HDBSCAN)
-        lengths: Optional trajectory lengths with shape (N,)
-        save_prefix: Prefix for saved figure filenames
-        noise_label: Label for noise points (default -1, ignored for KMeans)
-    """
     cluster_ids = np.asarray(cluster_ids)
     unique_labels = np.unique(cluster_ids)
 
@@ -103,7 +70,6 @@ def visualize_traj_clusters(
     noise_mask = cluster_ids == noise_label
 
     plt.figure(figsize=(8, 6))
-
     scatter = plt.scatter(
         X_pca[non_noise_mask, 0],
         X_pca[non_noise_mask, 1],
@@ -202,14 +168,6 @@ def visualize_traj_clusters(
 
 
 def plot_elbow(X, k_min=2, k_max=16, save_path="traj_pca_elbow.png"):
-    """
-    Plot elbow curve for KMeans clustering.
-    
-    Args:
-        X: Feature matrix with shape (N, D) (scaled features recommended)
-        k_min, k_max: Range of K values to explore
-        save_path: Path to save the elbow plot
-    """
     Ks = list(range(k_min, k_max + 1))
     inertias = []
 
@@ -236,16 +194,6 @@ def plot_elbow(X, k_min=2, k_max=16, save_path="traj_pca_elbow.png"):
 
 
 def select_k_elbow(Ks, inertias):
-    """
-    Select optimal K using second-order differences (curvature).
-    
-    Args:
-        Ks: Array of K values
-        inertias: Corresponding inertia values
-        
-    Returns:
-        best_k: Optimal number of clusters based on elbow point
-    """
     inertias = np.array(inertias)
     Ks = np.array(Ks)
 
@@ -257,152 +205,106 @@ def select_k_elbow(Ks, inertias):
     return int(best_k)
 
 
-def auto_select_k_kmeans(
-    X, k_min=2, k_max=20, random_state=0, n_init=20,
-    top_frac=0.20, k_floor=4
+def select_k_by_value_homogeneity(
+    X,
+    traj_returns,
+    k_candidates,
+    min_cluster_size=30,
+    lambda_small=1.0,
+    lambda_k=0.02,
 ):
-    """
-    Automatically select optimal K for KMeans using silhouette score.
-    
-    Args:
-        X: Feature matrix
-        k_min, k_max: Range of K values to test
-        random_state: Random seed for reproducibility
-        n_init: Number of KMeans initializations
-        top_frac: Fraction of top silhouette scores to consider
-        k_floor: Minimum acceptable K value
-        
-    Returns:
-        best_k: Selected optimal K
-        rows: Array containing evaluation metrics for all K values
-    """
-    rows = []
-    for K in range(k_min, k_max+1):
-        km = KMeans(n_clusters=K, random_state=random_state, n_init=n_init)
-        labels = km.fit_predict(X)
-        if len(np.unique(labels)) < 2:
-            continue
-        sil = silhouette_score(X, labels)
-        ch  = calinski_harabasz_score(X, labels)
-        db  = davies_bouldin_score(X, labels)
-        rows.append((K, sil, ch, db, km.inertia_))
-
-    rows = np.array(rows, dtype=object)
-    K_vals = rows[:,0].astype(int)
-    sil = rows[:,1].astype(float)
-
-    thr = np.quantile(sil, 1.0 - top_frac)
-    candidates = K_vals[sil >= thr]
-
-    candidates = candidates[candidates >= k_floor]
-    if len(candidates) == 0:
-        best_k = int(K_vals[np.argmax(sil)])
-    else:
-        best_k = int(candidates.min())
-    return best_k, rows
-
-def select_k_by_value_homogeneity(X, traj_returns, k_candidates):
-    """
-    traj_returns: offline dataset에서 trajectory return / success score
-    """
     best_k = None
     best_score = np.inf
+
+    N = len(traj_returns)
+    traj_returns = np.asarray(traj_returns, dtype=np.float64)
 
     for K in k_candidates:
         km = KMeans(n_clusters=K, random_state=0, n_init=20)
         labels = km.fit_predict(X)
 
-        # cluster 내부 return variance 평균
-        var_sum = 0.0
-        for c in range(K):
-            r = traj_returns[labels == c]
-            if len(r) > 1:
-                var_sum += np.var(r)
-        var_mean = var_sum / K
+        var_weighted_sum = 0.0
+        total_weight = 0.0
+        small_cnt = 0
 
-        if var_mean < best_score:
-            best_score = var_mean
+        for c in range(K):
+            idx = (labels == c)
+            n_c = int(idx.sum())
+            if n_c <= 1:
+                small_cnt += 1
+                continue
+
+            r = traj_returns[idx]
+            var_c = float(np.var(r))
+
+            var_weighted_sum += n_c * var_c
+            total_weight += n_c
+
+            if n_c < min_cluster_size:
+                small_cnt += 1
+
+        if total_weight == 0:
+            continue
+
+        var_weighted_mean = var_weighted_sum / total_weight
+        p_small = small_cnt / float(K)
+        penalty_small = lambda_small * p_small
+        penalty_k = lambda_k * K
+
+        score = var_weighted_mean + penalty_small + penalty_k
+
+        if score < best_score:
+            best_score = score
             best_k = K
 
     return best_k
 
 
 if __name__ == '__main__':
-    
     train_dataset = ...
     trajectory_boundaries = ...
     env_name = ...
-    
-    features, lengths = build_traj_features(train_dataset, trajectory_boundaries,
-                                        obs_key="observations",
-                                        obs_slice=None,  
-                                        k_keyframes=20)
-    
+
+    features, lengths = build_traj_features(
+        train_dataset,
+        trajectory_boundaries,
+        obs_key="observations",
+        obs_slice=None,
+        k_keyframes=20
+    )
 
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(features).astype(np.float64) 
+    X_scaled = scaler.fit_transform(features).astype(np.float64)
     pca_2d = PCA(n_components=2, random_state=0)
     X_pca = pca_2d.fit_transform(X_scaled)
 
-    # Elbow method or auto select k means
     Ks, inertias = plot_elbow(X_scaled, k_min=2, k_max=20, save_path=f"plot/{env_name}_elbow.png")
-    K = select_k_elbow(Ks, inertias) 
-    K, table = auto_select_k_kmeans(X_scaled)
+    K = select_k_elbow(Ks, inertias)
 
-    # K means
     kmeans = KMeans(n_clusters=K, random_state=0)
-    cluster_ids = kmeans.fit_predict(X_scaled) 
-    visualize_traj_clusters(
-        X_pca,
-        cluster_ids,
-        lengths,
-        save_prefix=f"{env_name}_kmeans"
-    )
+    cluster_ids = kmeans.fit_predict(X_scaled)
+    visualize_traj_clusters(X_pca, cluster_ids, lengths, save_prefix=f"{env_name}_kmeans")
     print(f"kmeans pngs are saved!")
 
-    # HDBSCAN
     clusterer = hdbscan.HDBSCAN(min_cluster_size=30)
     labels = clusterer.fit_predict(X_scaled)
-    visualize_traj_clusters(
-        X_pca, 
-        labels, 
-        lengths=lengths, 
-        save_prefix=f"{env_name}_hdbscan"
-    )
+    visualize_traj_clusters(X_pca, labels, lengths=lengths, save_prefix=f"{env_name}_hdbscan")
     print(f"hdbsan pngs are saved!")
 
-    # GMM
     pca_gmm = PCA(n_components=min(20, X_scaled.shape[1]), random_state=0)
     X_gmm = pca_gmm.fit_transform(X_scaled)
-    gmm = GaussianMixture(
-        n_components=K,
-        covariance_type="full",
-        random_state=0,
-    )
+    gmm = GaussianMixture(n_components=K, covariance_type="full", random_state=0)
     gmm_labels = gmm.fit_predict(X_scaled)
-    visualize_traj_clusters(
-        X_pca,
-        gmm_labels,
-        lengths=lengths,
-        save_prefix=f"{env_name}_gmm",
-        noise_label=-1, 
-    )
+    visualize_traj_clusters(X_pca, gmm_labels, lengths=lengths, save_prefix=f"{env_name}_gmm", noise_label=-1)
     print("GMM pngs are saved!")
 
-    # Spectral Clustering
     spectral = SpectralClustering(
         n_clusters=K,
         assign_labels="kmeans",
-        affinity="nearest_neighbors",  
-        n_neighbors=10,               
+        affinity="nearest_neighbors",
+        n_neighbors=10,
         random_state=0,
     )
     spectral_labels = spectral.fit_predict(X_scaled)
-    visualize_traj_clusters(
-        X_pca,
-        spectral_labels,
-        lengths=lengths,
-        save_prefix=f"{env_name}_gmm_spectral",
-        noise_label=-1, 
-    )
+    visualize_traj_clusters(X_pca, spectral_labels, lengths=lengths, save_prefix=f"{env_name}_gmm_spectral", noise_label=-1)
     print("Spectral pngs are saved!")

@@ -1,81 +1,184 @@
 <div align="center">
 
-# [Reinforcement Learning with Action Chunking](https://arxiv.org/abs/2507.07969)
-
-## [[website](https://colinqiyangli.github.io/qc/)]      [[pdf](https://arxiv.org/pdf/2507.07969)]
+# Trajectory-level Priority Sampling for Stable Offline-to-Online RL
 
 </div>
 
 <p align="center">
-  <a href="https://colinqiyangli.github.io/qc/">
-    <img alt="teaser figure" src="./assets/teaser.png" width="48%">
+  <a href="#">
+    <img alt="algorithm visualization" src="./assets/algorithm_visualizations_final.png" width="48%">
   </a>
-  <a href="https://colinqiyangli.github.io/qc/">
-    <img alt="aggregated results" src="./assets/agg.png" width="48%">
-  </a>
+  <span style="display: inline-block; width: 48%; vertical-align: top;">
+    <img alt="result 1" src="./assets/ClusterSampling.png" width="100%" style="margin-bottom: 2%;">
+    <img alt="result 2" src="./assets/TDerrorSampling.png" width="100%" style="margin-bottom: 2%;">
+    <img alt="result 3" src="./assets/TDError+Cluster.png" width="100%">
+  </span>
 </p>
 
 
 ## Overview
-Q-chunking runs RL on a *temporally extended action (action chunking) space* with an expressive behavior constraint to leverage prior data for improved exploration and online sample efficiency.
+This work introduces trajectory-level priority sampling methods for stable offline-to-online reinforcement learning:
+
+- **Offline Cluster-balanced Trajectory Sampling**: Ensures diverse trajectory coverage during offline training by clustering trajectories in feature space and sampling uniformly across clusters
+- **Online Trajectory-level Prioritized Experience Replay (T-PER)**: Prioritizes high-TD-error trajectories during online fine-tuning to focus learning on difficult transitions
+
+These methods improve sample efficiency and training stability in sparse reward robotic manipulation tasks.
+
+## Code Base
+This implementation is built on top of [Action Chunking with Flow Q-Learning (ACFQL)](https://github.com/seohongpark/qc), extending it with trajectory-level sampling strategies.
 
 ## Installation
 ```bash
+# Create conda environment
+conda create -n tper python=3.10
+conda activate tper
+
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-
 ## Datasets
-For robomimic, we assume the datasets are located at `~/.robomimic/lift/mh/low_dim_v15.hdf5`, `~/.robomimic/can/mh/low_dim_v15.hdf5`, and `~/.robomimic/square/mh/low_dim_v15.hdf5`. The datasets can be downloaded from https://robomimic.github.io/docs/datasets/robomimic_v0.1.html (under Method 2: Using Direct Download Links - Multi-Human (MH)).
+For robomimic environments, datasets should be located at:
+- `~/.robomimic/lift/mh/low_dim_v15.hdf5`
+- `~/.robomimic/can/mh/low_dim_v15.hdf5`
+- `~/.robomimic/square/mh/low_dim_v15.hdf5`
 
-For cube-quadruple, we use the 100M-size offline dataset. It can be downloaded from https://github.com/seohongpark/horizon-reduction via
+Download from: https://robomimic.github.io/docs/datasets/robomimic_v0.1.html (Method 2: Direct Download Links - Multi-Human (MH))
+
+For cube-quadruple, use the 100M-size offline dataset:
 ```bash
 wget -r -np -nH --cut-dirs=2 -A "*.npz" https://rail.eecs.berkeley.edu/datasets/ogbench/cube-quadruple-play-100m-v0/
 ```
-and include this flag in the command line `--ogbench_dataset_dir=[realpath/to/your/cube-quadruple-play-100m-v0/]` to make sure it is using the 100M-size dataset.
+Add flag: `--ogbench_dataset_dir=[realpath/to/your/cube-quadruple-play-100m-v0/]`
 
-## Reproducing paper results
+For sparse reward environments (`scene` and `puzzle-3x3`), use `--sparse=True`.
 
-We include the example command for all the methods we evaluate in our paper below. For `scene` and `puzzle-3x3` domains, use `--sparse=True`. We also release our plot data at [plot_data/README.md](plot_data/README.md).
+## Running Experiments
 
+### Basic Usage
 ```bash
-# QC
-MUJOCO_GL=egl python main.py --run_group=reproduce --agent.actor_type=best-of-n --agent.actor_num_samples=32 --env_name=cube-triple-play-singletask-task2-v0 --sparse=False --horizon_length=5
+# Baseline: ACFQL
+MUJOCO_GL=egl python main.py \
+  --run_group=baseline \
+  --env_name=square-mh-low \
+  --sparse=False \
+  --horizon_length=5 \
+  --offline_steps=1000000 \
+  --online_steps=1000000
 
-# BFN-n
-MUJOCO_GL=egl python main.py --run_group=reproduce --agent.actor_type=best-of-n --agent.actor_num_samples=4 --env_name=cube-triple-play-singletask-task2-v0 --sparse=False --horizon_length=5 --agent.action_chunking=False
+# With Cluster-balanced Sampling (Offline)
+MUJOCO_GL=egl python main.py \
+  --run_group=cluster_balanced \
+  --env_name=square-mh-low \
+  --sparse=False \
+  --horizon_length=5 \
+  --cluster_sampler=True \
+  --offline_steps=1000000 \
+  --online_steps=1000000
 
-# BFN
-MUJOCO_GL=egl python main.py --run_group=reproduce --agent.actor_type=best-of-n --agent.actor_num_samples=4 --env_name=cube-triple-play-singletask-task2-v0 --sparse=False --horizon_length=1
+# With T-PER (Online Priority Sampling)
+MUJOCO_GL=egl python main.py \
+  --run_group=tper \
+  --env_name=square-mh-low \
+  --sparse=False \
+  --horizon_length=5 \
+  --use_ptr_backward=True \
+  --use_ptr_online_priority=True \
+  --metric=td_error_rank \
+  --backward=True \
+  --offline_steps=1000000 \
+  --online_steps=1000000
 
-# QC-FQL
-MUJOCO_GL=egl python main.py --run_group=reproduce --agent.alpha=100 --env_name=cube-triple-play-singletask-task2-v0 --sparse=False --horizon_length=5
-
-# FQL-n
-MUJOCO_GL=egl python main.py --run_group=reproduce --agent.alpha=100 --env_name=cube-triple-play-singletask-task2-v0 --sparse=False --horizon_length=5 --agent.action_chunking=False
-
-# FQL
-MUJOCO_GL=egl python main.py --run_group=reproduce --agent.alpha=100 --env_name=cube-triple-play-singletask-task2-v0 --sparse=False --horizon_length=1
-
-# RLPD
-MUJOCO_GL=egl python main_online.py --env_name=cube-triple-play-singletask-task2-v0 --sparse=False --horizon_length=1 
-
-# RLPD-AC
-MUJOCO_GL=egl python main_online.py --env_name=cube-triple-play-singletask-task2-v0 --sparse=False --horizon_length=5
-
-# QC-RLPD
-MUJOCO_GL=egl python main_online.py --env_name=cube-triple-play-singletask-task2-v0 --sparse=False --horizon_length=5 --agent.bc_alpha=0.01
+# Full Method: Cluster-balanced + T-PER
+MUJOCO_GL=egl python main.py \
+  --run_group=full_method \
+  --env_name=square-mh-low \
+  --sparse=False \
+  --horizon_length=5 \
+  --cluster_sampler=True \
+  --use_ptr_backward=True \
+  --use_ptr_online_priority=True \
+  --metric=td_error_rank \
+  --backward=True \
+  --offline_steps=1000000 \
+  --online_steps=1000000
 ```
 
+### Key Hyperparameters
+
+**Cluster-balanced Sampling:**
+- `--cluster_sampler`: Enable cluster-balanced trajectory sampling during offline training
+
+**T-PER (Trajectory-level Priority Sampling):**
+- `--use_ptr_backward`: Enable backward sampling from trajectory endpoints
+- `--use_ptr_online_priority`: Enable online priority updates based on TD-error
+- `--metric`: Priority metric (`td_error_rank`, `success_binary`, `avg_reward`)
+- `--backward`: Sample from end of trajectories (recommended for sparse rewards)
+- `--ptr_warmup_steps`: Steps before enabling priority sampling (default: 20000)
+
+**SARSA-style Weighted Target:**
+- `--use_weighted_target`: Enable weighted combination of policy and trajectory targets
+- `--beta`: Weight for policy target (default: 0.5)
+
+## Project Structure
+
 ```
-@article{li2025qc,
-  author = {Qiyang Li and Zhiyuan Zhou and Sergey Levine},
-  title  = {Reinforcement Learning with Action Chunking},
-  conference = {arXiv Pre-print},
+.
+├── train.py                      # Main training script
+├── agents/
+│   └── acfql.py                 # ACFQL agent with priority sampling
+├── utils/
+│   └── datasets_success.py      # Dataset and PriorityTrajectorySampler
+├── cluster_vis.py               # Trajectory clustering utilities
+└── assets/
+    └── algorithm_visualizations_final.png
+```
+
+## Key Components
+
+### PriorityTrajectorySampler
+Located in `utils/datasets_success.py`, handles:
+- Trajectory boundary tracking
+- Priority computation (reward-based, success-based, TD-error-based)
+- Rank-based sampling for stability
+- Online priority updates
+
+### ClusterBalancedSampler
+Located in `train.py`, provides:
+- K-means clustering in trajectory feature space
+- Uniform sampling across clusters
+- Automatic K selection based on return homogeneity
+
+## Monitoring Training
+
+The code logs to Weights & Biases with the following key metrics:
+
+**Offline Phase:**
+- `offline_agent/critic_loss`: Critic training loss
+- `offline_agent/actor_loss`: Actor training loss
+- `cluster/offline/*`: Cluster sampling statistics
+
+**Online Phase:**
+- `online_agent/q_mean`: Average Q-values
+- `online_agent/td_error_mean`: TD-error statistics
+- `ptr/sample_online/*`: Priority sampling statistics
+- `eval/success_rate`: Task success rate
+
+## Citation
+
+If you use this code or find it helpful, please consider citing:
+
+```
+@article{yourname2025tper,
+  author = {Your Name},
+  title  = {Trajectory-level Priority Sampling for Stable Offline-to-Online RL},
   year = {2025},
-  url = {http://arxiv.org/abs/2507.07969},
 }
 ```
 
 ## Acknowledgments
-This codebase is built on top of [FQL](https://github.com/seohongpark/fql). The two rlpd_* folders are directly taken from [RLPD](https://github.com/ikostrikov/rlpd).
+
+This codebase builds upon:
+- [Action Chunking with Flow Q-Learning (ACFQL)](https://github.com/ColinQiyangLi/qc)
+- [Flow Q-Learning (FQL)](https://github.com/seohongpark/fql)
+- [RLPD](https://github.com/ikostrikov/rlpd)
