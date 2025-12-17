@@ -1,4 +1,3 @@
-# utils/datasets.py
 from functools import partial
 
 import jax
@@ -13,10 +12,9 @@ def get_size(data):
     return max(jax.tree_util.tree_leaves(sizes))
 
 
-# ----------------------------
-# Image augmentation helpers
-# ----------------------------
-
+# ============================================================================
+# Image Augmentation Helper
+# ============================================================================
 @partial(jax.jit, static_argnames=("padding",))
 def random_crop(img, crop_from, padding):
     """Randomly crop an image with padding."""
@@ -34,10 +32,9 @@ def batched_random_crop(imgs, crop_froms, padding):
     return jax.vmap(random_crop, (0, 0, None))(imgs, crop_froms, padding)
 
 
-# ----------------------------
+# ============================================================================
 # Dataset
-# ----------------------------
-
+# ============================================================================
 class Dataset(FrozenDict):
     """Static dataset (offline)."""
 
@@ -69,10 +66,7 @@ class Dataset(FrozenDict):
         self.terminal_locs = np.nonzero(self["terminals"] > 0)[0]
         self.initial_locs = np.concatenate([[0], self.terminal_locs[:-1] + 1])
 
-    # ----------------------------
     # Basic sampling
-    # ----------------------------
-
     def get_random_idxs(self, num_idxs):
         """Return `num_idxs` random indices from [0, self.size)."""
         return np.random.randint(self.size, size=num_idxs)
@@ -148,10 +142,6 @@ class Dataset(FrozenDict):
 
         return batch
 
-    # ----------------------------
-    # Sequence sampling (uniform)
-    # ----------------------------
-
     def _sample_sequence_core(self, start_idxs, sequence_length, discount):
         """
         Shared implementation used by:
@@ -167,7 +157,7 @@ class Dataset(FrozenDict):
         # Build all indices: (B, H)
         all_idxs = start_idxs[:, None] + np.arange(sequence_length)[None, :]
         all_idxs = np.clip(all_idxs, 0, self.size - 1)
-        flat_idxs = all_idxs.reshape(-1)  # (B*H,)
+        flat_idxs = all_idxs.reshape(-1)  
 
         # Fetch raw arrays
         obs_all = self["observations"][flat_idxs].reshape(
@@ -217,58 +207,43 @@ class Dataset(FrozenDict):
             )
             valid[:, i] = 1.0 - terminals[:, i - 1]
 
-        # Reorganize observation tensors:
-        # - For visual: (B, H, W, H_len, C) (time = second last axis)
-        # - For state: (B, H, obs_dim)
         if obs_all.ndim == 5:
             # (B, T, H, W, C) -> (B, H, W, T, C)
             full_obs = obs_all.transpose(0, 2, 3, 1, 4)
             full_next_obs = next_obs_all.transpose(0, 2, 3, 1, 4)
         else:
-            # (B, T, obs_dim)
             full_obs = obs_all
             full_next_obs = next_obs_all
 
-        # "observations" key: current-time step obs (t=0)
-        # 원래 코드가 data['observations'].copy()를 써서
-        # (B, obs_dim) 만 넘겼으니 그 형식을 유지
         data_obs = self["observations"][start_idxs].copy()
 
         return dict(
-            observations=data_obs,            # (B, obs_dim)
-            full_observations=full_obs,      # sequence
-            actions=act_all,                 # (B, H, act_dim)
-            masks=masks,                     # (B, H)
-            rewards=rewards,                 # (B, H)
-            terminals=terminals,             # (B, H)
-            valid=valid,                     # (B, H)
-            next_observations=full_next_obs, # sequence
-            next_actions=next_act_all,       # (B, H, act_dim)
+            observations=data_obs,            
+            full_observations=full_obs,      
+            actions=act_all,                 
+            masks=masks,                     
+            rewards=rewards,                 
+            terminals=terminals,             
+            valid=valid,                     
+            next_observations=full_next_obs, 
+            next_actions=next_act_all,       
         )
 
     def sample_sequence(self, batch_size, sequence_length, discount):
-        # 기존처럼 uniform random start index 선택
         idxs = np.random.randint(self.size - sequence_length + 1, size=batch_size)
         return self.sample_sequence_from_start_idxs(idxs, sequence_length, discount)
 
     def sample_sequence_from_start_idxs(self, start_idxs, sequence_length, discount):
-        """
-        주어진 start index 배열(start_idxs)에 대해
-        기존 sample_sequence와 동일한 포맷의 batch를 만든다.
-        """
         start_idxs = np.asarray(start_idxs)
         batch_size = start_idxs.shape[0]
 
-        # (batch_size,) → 기존 sample_sequence와 동일하게 'data' 구성
         data = {k: v[start_idxs] for k, v in self.items()}
 
-        # (batch_size, sequence_length) 의 전역 인덱스
         all_idxs = start_idxs[:, None] + np.arange(sequence_length)[None, :]
         max_idx = self.size - 1
         all_idxs = np.clip(all_idxs, 0, max_idx)
         flat_idxs = all_idxs.reshape(-1)
 
-        # 이하 내용은 기존 sample_sequence 로직과 동일하게 맞춘다
         obs = self["observations"]
         nxt_obs = self["next_observations"]
         act = self["actions"]
@@ -296,13 +271,10 @@ class Dataset(FrozenDict):
             batch_size, sequence_length, *term.shape[1:]
         )
 
-        # next_actions도 동일하게 구성
         next_action_idxs = np.minimum(flat_idxs + 1, max_idx)
         batch_next_actions = act[next_action_idxs].reshape(
             batch_size, sequence_length, *act.shape[1:]
         )
-
-        # 누적 reward / mask / terminal / valid 계산
         rewards = np.zeros((batch_size, sequence_length), dtype=float)
         masks = np.ones((batch_size, sequence_length), dtype=float)
         terminals = np.zeros((batch_size, sequence_length), dtype=float)
@@ -326,19 +298,18 @@ class Dataset(FrozenDict):
             )
             valid[:, i] = 1.0 - terminals[:, i - 1]
 
-        # obs shape 정리 (이미지 vs state)
-        if len(batch_observations.shape) == 5:
+        if len(batch_observations.shape) == 5: #image
             # (B, H, H, W, C) → (B, H_img, W_img, H, C)
             full_observations = batch_observations.transpose(0, 2, 3, 1, 4)
             full_next_observations = batch_next_observations.transpose(0, 2, 3, 1, 4)
-        else:
+        else: #state
             full_observations = batch_observations
             full_next_observations = batch_next_observations
 
         return dict(
-            observations=data["observations"].copy(),  # (B, obs_dim)
-            full_observations=full_observations,       # (B, H, obs_dim) or image형식
-            actions=batch_actions,                     # (B, H, act_dim)
+            observations=data["observations"].copy(), 
+            full_observations=full_observations,      
+            actions=batch_actions,                     
             masks=masks,
             rewards=rewards,
             terminals=terminals,
@@ -349,10 +320,9 @@ class Dataset(FrozenDict):
 
 
 
-# ----------------------------
+# ============================================================================
 # ReplayBuffer
-# ----------------------------
-
+# ============================================================================
 class ReplayBuffer(Dataset):
     """Replay buffer that extends Dataset with add() / clear()."""
 
@@ -401,7 +371,9 @@ class ReplayBuffer(Dataset):
 
         jax.tree_util.tree_map(set_idx, self._dict, transition)
         self.pointer = (self.pointer + 1) % self.max_size
-        self.size = max(self.size, self.pointer)
+        # self.size = max(self.size, self.pointer)
+        self.size = min(self.max_size, self.size + 1)
+
 
     def clear(self):
         """Clear the replay buffer."""
@@ -409,10 +381,9 @@ class ReplayBuffer(Dataset):
         self.pointer = 0
 
 
-# ----------------------------
-# History utility (unchanged)
-# ----------------------------
-
+# ============================================================================
+# History Utility
+# ============================================================================
 def add_history(dataset, history_length):
     size = dataset.size
     (terminal_locs,) = np.nonzero(dataset["terminals"] > 0)
@@ -459,18 +430,16 @@ def add_history(dataset, history_length):
     )
     return dataset
 
-
-# ----------------------------
+# ============================================================================
 # PriorityTrajectorySampler
-# ----------------------------
-
+# ============================================================================
 class PriorityTrajectorySampler:
     """
-    Trajectory-level priority sampler. It NEVER stores transitions itself,
-    only uses:
-      - trajectory_boundaries (list of (start, end))
-      - rewards_source: 1D or 2D rewards array
-    and returns start indices for sequences.
+    Trajectory-level priority sampler with:
+    - reward-based metrics
+    - success-based metrics
+    - TD-error rank-based priority
+    - eps-uniform mixing for stability
     """
 
     def __init__(
@@ -478,123 +447,201 @@ class PriorityTrajectorySampler:
         trajectory_boundaries,
         rewards_source,
         metric="success_binary",
+        success_source=None,   
         temperature=1.0,
+        alpha_rank=0.7,      # rank exponent (lower → more uniform)
+        eps_uniform=0.05,    # exploration mixing
     ):
-        """
-        trajectory_boundaries : list[(start_idx, end_idx)]
-        rewards_source        : numpy array of shape (N,) or (N,1) from dataset/replay_buffer["rewards"]
-        """
         self.trajectory_boundaries = trajectory_boundaries
         self.rewards_source = np.asarray(rewards_source)
         self.metric = metric
         self.temperature = temperature
 
+        self.alpha_rank = alpha_rank
+        self.eps_uniform = eps_uniform
+
         self.priorities = None
         self.success_flags = None
         self.rewards_per_traj = None
 
+        # TD-error statistics
+        self.td_error_mean = None  
+        self.num_offline_traj = 0
+        self.rewards_source = np.asarray(rewards_source)
+        self.success_source = None if success_source is None else np.asarray(success_source)
+
+
+        # Build basic statistics (success flags, rewards per traj)
         self._compute_basic_stats()
 
+    def normalize_td_errors(self, td_abs):
+        """
+        td_abs: np.ndarray (N,)  abs(td_error)
+        returns: normalized abs(td_error)
+        """
+        td_abs = np.asarray(td_abs, dtype=float)
+
+        m = td_abs.mean()
+        v = ((td_abs - m) ** 2).mean()
+
+        b = self.td_scale_beta
+        self.td_scale_mean = b * self.td_scale_mean + (1 - b) * m
+        self.td_scale_var  = b * self.td_scale_var  + (1 - b) * v
+
+        std = np.sqrt(max(self.td_scale_var, 0.0)) + self.td_scale_eps
+        return td_abs / std
+    
+    # Build reward per trajectory + success flags
     def _compute_basic_stats(self):
-        """Precompute reward arrays for each trajectory."""
         self.success_flags = []
         self.rewards_per_traj = []
 
         for start, end in self.trajectory_boundaries:
-            rewards = self.rewards_source[start : end + 1]
-            # squeeze last dim if (N,1)
-            rewards = np.asarray(rewards).squeeze()
+            r = self.rewards_source[start:end+1]
+            self.rewards_per_traj.append(r)
 
-            is_success = np.any(rewards >= -0.5)
-            self.success_flags.append(is_success)
-            self.rewards_per_traj.append(rewards.copy())
+            if self.success_source is not None:
+                s = self.success_source[start:end+1]
+                self.success_flags.append(np.any(s > 0.5))
+            else:
+                self.success_flags.append(np.any(r >= -0.5))  # fallback for robomimic
 
-    def compute_priorities(self):
-        """PTR 논문 Section 5.2 기반 metrics"""
+
+        # for start, end in self.trajectory_boundaries:
+        #     r = self.rewards_source[start:end+1]
+        #     self.rewards_per_traj.append(r)
+        #     self.success_flags.append(np.any(r >= -0.5))
+
+        self.success_flags = np.asarray(self.success_flags, dtype=bool)
+
+        # Maintain existing TD-error
+        n_traj = len(self.trajectory_boundaries)
+
+        if self.td_error_mean is None:
+            # First initialization
+            self.td_error_mean = np.zeros(n_traj, dtype=float)
+        else:
+            # Extend if #traj increased
+            old_len = len(self.td_error_mean)
+            if n_traj > old_len:
+                new_arr = np.zeros(n_traj, dtype=float)
+                new_arr[:old_len] = self.td_error_mean
+                self.td_error_mean = new_arr
+            # If equal, keep as is
+
+    # Update TD-error (EMA Tracking)
+    def update_td_error_from_batch(self, traj_ids, td_errors, ema_beta=0.9):
+        traj_ids = np.asarray(traj_ids, dtype=int)
+        td_errors = np.asarray(td_errors, dtype=float)
+
+        # Expand if needed
+        if self.td_error_mean is None:
+            self.td_error_mean = np.zeros(len(self.trajectory_boundaries), dtype=float)
+
+        for tid, delta in zip(traj_ids, td_errors):
+            old = self.td_error_mean[tid]
+            if old == 0.0:
+                new_val = float(delta)
+            else:
+                new_val = ema_beta * old + (1.0 - ema_beta) * abs(delta)
+            self.td_error_mean[tid] = new_val
+
+    # score -> rank-based priority
+    def _scores_to_rank_based_priorities(self, scores):
+        n = len(scores)
+
+        # All same → uniform
+        if np.all(scores == scores[0]):
+            return np.ones(n) / n
+
+        # large score → rank 0
+        order = np.argsort(-scores)
+        ranks = np.empty_like(order)
+        ranks[order] = np.arange(n)
+
+        # w_i = 1 / rank^alpha
+        w = 1.0 / ((ranks + 1) ** self.alpha_rank)
+        w_sum = w.sum()
+        base_p = w / w_sum
+
+        # eps-uniform mixture
+        if self.eps_uniform > 0:
+            uniform = np.ones(n) / n
+            p = (1 - self.eps_uniform) * base_p + self.eps_uniform * uniform
+        else:
+            p = base_p
+
+        return p
+    
+
+
+    # compute trajectory-level priority distribution
+    def compute_priorities(self, log_to_wandb=False):
         n = len(self.trajectory_boundaries)
         scores = np.zeros(n, dtype=float)
-        
+
+        # compute score per trajectory
         for i, rewards in enumerate(self.rewards_per_traj):
             rewards = np.atleast_1d(rewards)
 
-            # ===== Quality-based (sparse reward 최적) =====
             if self.metric == "success_binary":
                 scores[i] = 2.0 if self.success_flags[i] else 0.1
-            
+
             elif self.metric == "avg_reward":
-                # PTR baseline
                 scores[i] = float(np.mean(rewards))
-            
-            elif self.metric == "uqm_reward":
-                # PTR best for sparse (Table 3)
+
+            elif self.metric == "uqm_reward":   # Upper quartile mean
                 sorted_r = np.sort(rewards)
-                q75_idx = int(len(sorted_r) * 0.75)
-                scores[i] = float(np.mean(sorted_r[q75_idx:]))  # Top 25%
-            
-            elif self.metric == "uhm_reward":
-                # Upper Half Mean
+                q75 = int(len(sorted_r) * 0.75)
+                scores[i] = float(np.mean(sorted_r[q75:]))
+
+            elif self.metric == "uhm_reward":   # Upper half mean
                 sorted_r = np.sort(rewards)
-                q50_idx = len(sorted_r) // 2
-                scores[i] = float(np.mean(sorted_r[q50_idx:]))
-            
+                mid = len(sorted_r) // 2
+                scores[i] = float(np.mean(sorted_r[mid:]))
+
             elif self.metric == "min_reward":
-                # Filter out low-quality trajectories
                 scores[i] = float(np.min(rewards))
-            
-            # ===== Uniform baseline =====
+
             elif self.metric == "uniform":
-                scores[i] = 1.0
-            
+                scores[i] = 1.0   # 어차피 나중에 uniform 처리
+
+            elif self.metric == "td_error_rank":
+                scores[i] = float(self.td_error_mean[i])
+
             else:
                 raise ValueError(f"Unknown metric: {self.metric}")
-       
 
+        # ---------------------------
+        # 2) uniform이면 그냥 균등 분포
+        # ---------------------------
         if self.metric == "uniform":
-            self.priorities = np.ones_like(scores) / len(scores)
-            return
+            priorities = np.ones(n) / n
+            self.priorities = priorities
+            return {"priorities": priorities}
 
-        if not np.isfinite(scores).all() or np.allclose(scores, scores[0]):
-            self.priorities = np.ones_like(scores) / len(scores)
-            return
+        # ---------------------------
+        # 3) reward metric일 때: 음수 shift + temperature
+        #    (td_error_rank는 건드리지 X)
+        # ---------------------------
+        if self.metric != "td_error_rank":
+            if np.min(scores) < 0:
+                scores = scores - np.min(scores) + 1e-6
 
-        # rank 기반 priority 계산
-        #   - score가 클수록 좋은 trajectory라고 가정
-        #   - 가장 큰 score → rank 1 (최상위)
-        order = np.argsort(-scores)                # 내림차순 정렬된 index
-        ranks = np.empty_like(order, dtype=float)  # ranks[i] = 그 trajectory의 순위 (1=best)
-        ranks[order] = np.arange(1, n + 1)
+            if self.temperature != 1.0:
+                # temperature는 순위 보존하는 monotonic transform
+                scores = scores ** (1.0 / self.temperature)
 
-        # temperature를 PTR의 alpha처럼 사용 (alpha > 0)
-        alpha = 1.0 / max(self.temperature, 1e-6)  # 온도 해석을 반대로 쓰고 싶으면 여기 조정
+        # ---------------------------
+        # 4) 최종 priority = rank 기반 (공통)
+        # ---------------------------
+        priorities = self._scores_to_rank_based_priorities(scores)
+        self.priorities = priorities
 
-        # rank가 낮을수록(=좋을수록) priority가 크도록
-        # p_i ∝ 1 / rank_i^alpha
-        p = 1.0 / (ranks ** alpha)
+        return {"priorities": priorities}
 
-        # 5) normalize
-        p_sum = p.sum()
-        if p_sum <= 0 or not np.isfinite(p_sum):
-            self.priorities = np.ones_like(p) / len(p)
-        else:
-            self.priorities = p / p_sum
-        
-        # # Handle negative scores (important for sparse reward!)
-        # if np.min(scores) < 0:
-        #     scores = scores - np.min(scores) + 1e-6
-        
-        # # Temperature scaling
-        # if self.temperature != 1.0:
-        #     scores = scores ** (1.0 / self.temperature)
-        
-        # # Normalize
-        # scores_sum = scores.sum()
-        # if scores_sum <= 0:
-        #     self.priorities = np.ones_like(scores) / len(scores)
-        # else:
-            # self.priorities = scores / scores_sum
 
     def sample_trajectory_indices(self, batch_size):
-        """(optional) sample just trajectory indices."""
         if self.priorities is None:
             self.compute_priorities()
 
@@ -605,10 +652,6 @@ class PriorityTrajectorySampler:
         )
 
     def sample_start_indices(self, batch_size, sequence_length):
-        """
-        Sample start indices for sequences of length H, using
-        trajectory-level priorities.
-        """
         if self.priorities is None:
             self.compute_priorities()
 
@@ -619,6 +662,7 @@ class PriorityTrajectorySampler:
         )
 
         start_idxs = np.zeros(batch_size, dtype=int)
+
         for i, tid in enumerate(traj_ids):
             start, end = self.trajectory_boundaries[tid]
             length = end - start + 1
@@ -630,11 +674,114 @@ class PriorityTrajectorySampler:
 
         return start_idxs
 
-    def update_online(self, rewards_source, trajectory_boundaries):
-        """
-        Call this after replay_buffer has grown during online RL.
-        """
+    # ================================================================
+    # Update sampler when online buffer grows
+    # ================================================================
+    def update_online(self, rewards_source, trajectory_boundaries, success_source=None):
         self.rewards_source = np.asarray(rewards_source)
         self.trajectory_boundaries = trajectory_boundaries
+
+        if success_source is not None:
+            self.success_source = np.asarray(success_source)
+
         self._compute_basic_stats()
         self.compute_priorities()
+
+
+
+# def get_group_weights(step, T_curr):
+#     # 0 ~ 1 사이 curriculum 진도
+#     alpha = np.clip(step / T_curr, 0.0, 1.0)
+    
+#     # 초반 비율
+#     w_easy0, w_med0, w_hard0 = 0.7, 0.2, 0.1
+#     # 후반(완료) 비율
+#     w_easy1, w_med1, w_hard1 = 1/3, 1/3, 1/3
+
+#     w_easy  = (1-alpha) * w_easy0  + alpha * w_easy1
+#     w_med   = (1-alpha) * w_med0   + alpha * w_med1
+#     w_hard  = (1-alpha) * w_hard0  + alpha * w_hard1
+#     return w_easy, w_med, w_hard
+
+
+# def get_cluster_weights(step, T_curr, K,
+#                         easy_clusters, medium_clusters, hard_clusters):
+#     w_easy, w_med, w_hard = get_group_weights(step, T_curr)
+#     w = np.zeros(K, dtype=np.float32)
+
+#     if len(easy_clusters) > 0:
+#         w[easy_clusters] = w_easy / len(easy_clusters)
+#     if len(medium_clusters) > 0:
+#         w[medium_clusters] = w_med / len(medium_clusters)
+#     if len(hard_clusters) > 0:
+#         w[hard_clusters] = w_hard / len(hard_clusters)
+
+#     w /= w.sum()
+#     return w
+
+
+
+# class ClusterBalancedSampler:
+#     def __init__(self,
+#                  trajectory_boundaries,
+#                  cluster_ids,
+#                  priorities=None,
+#                  easy_clusters=None,
+#                  medium_clusters=None,
+#                  hard_clusters=None,
+#                  T_curr=2_00_000):
+#         self.trajectory_boundaries = trajectory_boundaries
+#         self.cluster_ids = np.asarray(cluster_ids, dtype=np.int32)
+#         self.num_traj = len(trajectory_boundaries)
+#         self.K = int(self.cluster_ids.max()) + 1
+
+#         self.cluster_to_trajs = {cid: [] for cid in range(self.K)}
+#         for tid, cid in enumerate(self.cluster_ids):
+#             self.cluster_to_trajs[cid].append(tid)
+#         self.cluster_to_trajs = {cid: np.array(tids, dtype=np.int32)
+#                                  for cid, tids in self.cluster_to_trajs.items()}
+
+#         # priority (e.g. avg_return, td-error rank 등)
+#         if priorities is None:
+#             priorities = np.ones(self.num_traj, dtype=np.float32)
+#         self.priorities = np.asarray(priorities, dtype=np.float32)
+
+#         # 난이도 그룹
+#         self.easy_clusters = list(easy_clusters)
+#         self.medium_clusters = list(medium_clusters)
+#         self.hard_clusters = list(hard_clusters)
+#         self.T_curr = T_curr
+
+#     def get_cluster_weights(self, step):
+#         return get_cluster_weights(
+#             step, self.T_curr, self.K,
+#             self.easy_clusters, self.medium_clusters, self.hard_clusters
+#         )
+
+#     def sample_trajectory_indices(self, batch_size, global_step):
+#         # 1) cluster weights
+#         w_cluster = self.get_cluster_weights(global_step)
+
+#         # 2) 각 샘플마다 cluster 먼저 뽑기
+#         chosen_clusters = np.random.choice(
+#             self.K, size=batch_size, p=w_cluster
+#         )
+
+#         traj_idxs = np.empty(batch_size, dtype=np.int32)
+
+#         for i, cid in enumerate(chosen_clusters):
+#             trajs_c = self.cluster_to_trajs[cid]
+#             if len(trajs_c) == 0:
+#                 # 비어있으면 fallback: 전체 uniform
+#                 traj_idxs[i] = np.random.randint(0, self.num_traj)
+#                 continue
+
+#             # --- cluster 내부 priority ---
+#             pri_c = self.priorities[trajs_c]
+#             if pri_c.sum() <= 0:
+#                 p = None  # uniform
+#             else:
+#                 p = pri_c / pri_c.sum()
+#             traj_idxs[i] = np.random.choice(trajs_c, p=p)
+
+#         return traj_idxs

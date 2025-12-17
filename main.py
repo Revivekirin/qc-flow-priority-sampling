@@ -19,7 +19,7 @@ from envs.robomimic_utils import is_robomimic_env
 from evaluation import evaluate
 from log_utils import CsvLogger, get_exp_name, get_flag_dict, setup_wandb
 from utils.flax_utils import save_agent
-from utils.datasets_success import Dataset, ReplayBuffer, PriorityTrajectorySampler
+from utils.datasets import Dataset, ReplayBuffer, PriorityTrajectorySampler
 
 from cluster_vis import build_traj_features, visualize_traj_clusters, select_k_by_value_homogeneity
 from sklearn.preprocessing import StandardScaler

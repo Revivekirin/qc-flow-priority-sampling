@@ -4,16 +4,20 @@
 
 </div>
 
-<p align="center">
-  <a href="#">
-    <img alt="algorithm visualization" src="./assets/algorithm_visualizations_final.png" width="48%">
-  </a>
-  <span style="display: inline-block; width: 48%; vertical-align: top;">
-    <img alt="result 1" src="./assets/ClusterSampling.png" width="100%" style="margin-bottom: 2%;">
-    <img alt="result 2" src="./assets/TDerrorSampling.png" width="100%" style="margin-bottom: 2%;">
-    <img alt="result 3" src="./assets/TDError+Cluster.png" width="100%">
-  </span>
-</p>
+<table>
+  <tr>
+    <td width="48%" valign="top">
+      <img src="./assets/algorithm_visualizations_final.png" alt="Algorithm Visualization" width="100%">
+    </td>
+    <td width="48%" valign="top">
+      <img src="./assets/ClusterSampling.png" alt="Cluster Sampling" width="100%">
+      <br>
+      <img src="./assets/TDerrorSampling.png" alt="TD-Error Sampling" width="100%">
+      <br>
+      <img src="./assets/TDError+Cluster.png" alt="Apply Cluster, TD-Error Sampling" width="100%">
+    </td>
+  </tr>
+</table>
 
 
 ## Overview
@@ -58,18 +62,18 @@ For sparse reward environments (`scene` and `puzzle-3x3`), use `--sparse=True`.
 ### Basic Usage
 ```bash
 # Baseline: ACFQL
-MUJOCO_GL=egl python main.py \
+MUJOCO_GL=egl python train.py \
   --run_group=baseline \
-  --env_name=square-mh-low \
+  --env_name=cube-triple-play-singletask-task2-v0 \
   --sparse=False \
   --horizon_length=5 \
   --offline_steps=1000000 \
   --online_steps=1000000
 
 # With Cluster-balanced Sampling (Offline)
-MUJOCO_GL=egl python main.py \
+MUJOCO_GL=egl python train.py \
   --run_group=cluster_balanced \
-  --env_name=square-mh-low \
+  --env_name=cube-triple-play-singletask-task2-v0 \
   --sparse=False \
   --horizon_length=5 \
   --cluster_sampler=True \
@@ -77,9 +81,9 @@ MUJOCO_GL=egl python main.py \
   --online_steps=1000000
 
 # With T-PER (Online Priority Sampling)
-MUJOCO_GL=egl python main.py \
+MUJOCO_GL=egl python train.py \
   --run_group=tper \
-  --env_name=square-mh-low \
+  --env_name=cube-triple-play-singletask-task2-v0 \
   --sparse=False \
   --horizon_length=5 \
   --use_ptr_backward=True \
@@ -90,9 +94,9 @@ MUJOCO_GL=egl python main.py \
   --online_steps=1000000
 
 # Full Method: Cluster-balanced + T-PER
-MUJOCO_GL=egl python main.py \
+MUJOCO_GL=egl python train.py \
   --run_group=full_method \
-  --env_name=square-mh-low \
+  --env_name=cube-triple-play-singletask-task2-v0 \
   --sparse=False \
   --horizon_length=5 \
   --cluster_sampler=True \
@@ -128,7 +132,7 @@ MUJOCO_GL=egl python main.py \
 ├── agents/
 │   └── acfql.py                 # ACFQL agent with priority sampling
 ├── utils/
-│   └── datasets_success.py      # Dataset and PriorityTrajectorySampler
+│   └── datasets.py      # Dataset and PriorityTrajectorySampler
 ├── cluster_vis.py               # Trajectory clustering utilities
 └── assets/
     └── algorithm_visualizations_final.png
@@ -137,7 +141,7 @@ MUJOCO_GL=egl python main.py \
 ## Key Components
 
 ### PriorityTrajectorySampler
-Located in `utils/datasets_success.py`, handles:
+Located in `utils/datasets.py`, handles:
 - Trajectory boundary tracking
 - Priority computation (reward-based, success-based, TD-error-based)
 - Rank-based sampling for stability
