@@ -102,14 +102,14 @@
 #   --entity=sophia435256-robros
 
 MUJOCO_GL=egl python debug.py \
-  --env_name=square-mh-low \
+  --env_name=transport-mh-low \
   --use_ptr_backward=True \
   --use_ptr_online_priority=True \
   --sparse=False \
   --agent.alpha=100 \
   --horizon_length=5 \
-  --metric=td_error_rank\
+  --metric=td_error_rank \
   --backward=False \
   --use_weighted_target=False \
-  --cluster_sampler=True \
+  --cluster_sampler=False \
   --entity=sophia435256-robros \

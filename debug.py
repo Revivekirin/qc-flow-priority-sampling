@@ -21,7 +21,7 @@ from log_utils import CsvLogger, get_exp_name, get_flag_dict, setup_wandb
 from utils.flax_utils import save_agent
 
 # ✅ success 버전 dataset / replay / sampler
-from utils.datasets_success import Dataset, ReplayBuffer, PriorityTrajectorySampler
+from utils.datasets import Dataset, ReplayBuffer, PriorityTrajectorySampler
 
 from cluster_vis import (
     build_traj_features,
@@ -73,7 +73,7 @@ flags.DEFINE_string("entity", "entity", "wandb entity")
 flags.DEFINE_bool("use_ptr_backward", True, "Use PTR trajectory-priority sampling.")
 flags.DEFINE_bool("use_ptr_online_priority", True, "Update PTR priorities online.")
 flags.DEFINE_bool("save_all_online_states", False, "Save trajectory states.")
-flags.DEFINE_bool("backward", True, "PTR backward sampling.")
+flags.DEFINE_bool("backward", False, "PTR backward sampling.")
 flags.DEFINE_float("beta", 0.5, "Beta for PTR sarsa target critic weighted target.")
 flags.DEFINE_bool("use_weighted_target", False, "Use PTR sarsa target critic weighted target.")
 flags.DEFINE_string(
@@ -354,7 +354,7 @@ def main(_):
     # k_candidates = list(range(5, 13))
     # K = select_k_by_value_homogeneity(X_scaled, traj_returns, k_candidates)
     # print(f"Selected K for clustering: {K}")
-    K = 7
+    K = 5
 
     kmeans = KMeans(n_clusters=K, random_state=0)
     cluster_ids = kmeans.fit_predict(X_scaled)
