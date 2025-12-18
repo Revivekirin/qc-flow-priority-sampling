@@ -57,7 +57,7 @@ flags.DEFINE_integer("eval_episodes", 50, "Evaluation episodes.")
 flags.DEFINE_integer("video_episodes", 0, "Video episodes.")
 flags.DEFINE_integer("video_frame_skip", 3, "Video frame skip.")
 
-config_flags.DEFINE_config_file("agent", "agents/acfql.py", lock_config=False)
+config_flags.DEFINE_config_file("agent", "agents/acfql_pars.py", lock_config=False)
 
 flags.DEFINE_float("dataset_proportion", 1.0, "Percentage of dataset to load.")
 flags.DEFINE_integer("dataset_replace_interval", 1000, "Large dataset rotation interval (OGBench).")
@@ -86,6 +86,15 @@ flags.DEFINE_integer("ptr_warmup_steps", 20000, "Number of online steps before e
 # Cluster
 flags.DEFINE_bool("cluster_sampler", False, "Cluster Sampler (kmeans)")
 
+# ============================================================================
+# Chunked-PARS (PA + reward scaling) FLAGS
+# ============================================================================
+flags.DEFINE_bool("use_chunked_pars", False, "Use Chunked-PARS (PA + RS-LN).")
+flags.DEFINE_float("pars_alpha", 1.0, "Alpha for PA loss.")
+flags.DEFINE_float("reward_scale", 10.0, "Reward scaling c_reward in PARS.")
+flags.DEFINE_float("r_min", -1.0, "Minimum per-step reward for Qmin.")
+flags.DEFINE_float("pa_guard", 0.05, "Guard margin outside action bounds for infeasible sampling.")
+flags.DEFINE_float("pa_delta", 0.5, "How far beyond bounds to sample infeasible actions.")
 
 # ============================================================================
 # Logging helper
@@ -105,7 +114,40 @@ class LoggingHelper:
 
 
 # ============================================================================
-# Sampler (PTR) - ✅ traj_len < seq_len이면 "다른 traj로 resample" (traj_id mismatch 방지)
+# ✅ Chunked-PARS: infeasible chunk sampler
+# ============================================================================
+def sample_infeasible_chunks(batch_size, H, act_dim, low, high, guard=0.05, delta=0.5):
+    """
+    low/high: shape (act_dim,)
+    returns: (batch_size, H, act_dim) with at least one coordinate pushed outside [low, high]
+    """
+    low = np.asarray(low)
+    high = np.asarray(high)
+
+    L = low - guard
+    U = high + guard
+
+    # start from feasible random chunk
+    a = np.random.uniform(low=low, high=high, size=(batch_size, H, act_dim)).astype(np.float32)
+
+    # push exactly one coordinate outside
+    ks = np.random.randint(0, H * act_dim, size=(batch_size,))
+    side = np.random.rand(batch_size) < 0.5  # below L or above U
+
+    for i in range(batch_size):
+        k = int(ks[i])
+        t = k // act_dim
+        j = k % act_dim
+        if side[i]:
+            a[i, t, j] = np.random.uniform(L[j] - delta, L[j]).astype(np.float32)
+        else:
+            a[i, t, j] = np.random.uniform(U[j], U[j] + delta).astype(np.float32)
+
+    return a
+
+
+# ============================================================================
+# Sampler (PTR) - ✅ traj_len < seq_len이면 "다른 traj로 resample"
 # ============================================================================
 def sample_sequence_PTR(
     dataset,
@@ -130,7 +172,6 @@ def sample_sequence_PTR(
     sampled_priors = []
 
     for i in range(batch_size):
-        # ---- resample traj until it's long enough (or give up gracefully) ----
         tid = int(traj_ids[i])
         for _ in range(max_resample_tries):
             s0, e0 = boundaries[tid]
@@ -143,9 +184,7 @@ def sample_sequence_PTR(
         start, end = boundaries[tid]
         traj_len = end - start + 1
 
-        # ---- choose start within this (tid) trajectory ----
         if traj_len < seq_len:
-            # fallback: still stay inside the same traj (consistent with traj_id)
             s = start
         else:
             if backward:
@@ -156,7 +195,6 @@ def sample_sequence_PTR(
 
         start_idxs[i] = s
 
-        # ---- logging stats (optional) ----
         if log_prefix is not None:
             denom = max(1, traj_len - seq_len + 1)
             rel_pos = (s - start) / denom
@@ -175,7 +213,7 @@ def sample_sequence_PTR(
     batch = dataset.sample_sequence_from_start_idxs(start_idxs, seq_len, discount)
     batch = dict(batch)
     batch["traj_ids"] = traj_ids
-    batch["start_idxs"] = start_idxs  # ✅ 디버그/정합성 체크용
+    batch["start_idxs"] = start_idxs
 
     if log_prefix is not None and global_step is not None and len(rel_starts) > 0:
         log_dict = {
@@ -263,6 +301,12 @@ def main(_):
     config["use_weighted_target"] = FLAGS.use_weighted_target
     config["beta"] = FLAGS.beta
 
+    # ✅ Chunked-PARS config inject
+    config["use_chunked_pars"] = FLAGS.use_chunked_pars
+    config["pars_alpha"] = FLAGS.pars_alpha
+    config["reward_scale"] = FLAGS.reward_scale
+    config["r_min"] = FLAGS.r_min
+
     # Env & Dataset
     if FLAGS.ogbench_dataset_dir:
         dataset_paths = sorted(
@@ -273,6 +317,10 @@ def main(_):
         )
     else:
         env, eval_env, train_dataset, val_dataset = make_env_and_datasets(FLAGS.env_name)
+
+    # ✅ action bounds for PA sampling
+    act_low = env.action_space.low
+    act_high = env.action_space.high
 
     # RNG & Seeding
     random.seed(FLAGS.seed)
@@ -308,7 +356,7 @@ def main(_):
     if "is_success" not in d0:
         d0["is_success"] = np.zeros_like(d0["terminals"], dtype=np.float32)
 
-    # ✅ replay_buffer는 "딱 1번" 만들고 offline+online 내내 그대로 사용 (중요)
+    # ✅ replay_buffer는 "딱 1번" 만들고 offline+online 내내 그대로 사용
     buffer_size = max(FLAGS.buffer_size, train_dataset.size + 1)
     replay_buffer = ReplayBuffer.create_from_initial_dataset(d0, size=buffer_size)
 
@@ -338,8 +386,8 @@ def main(_):
     if FLAGS.use_ptr_backward:
         ptr_sampler = PriorityTrajectorySampler(
             trajectory_boundaries=trajectory_boundaries,
-            rewards_source=replay_buffer["rewards"],     
-            success_source=replay_buffer["is_success"],   
+            rewards_source=replay_buffer["rewards"],
+            success_source=replay_buffer["is_success"],
             metric=FLAGS.metric,
             temperature=1.0,
         )
@@ -351,11 +399,7 @@ def main(_):
     pca_2d = PCA(n_components=2, random_state=0)
     X_pca = pca_2d.fit_transform(X_scaled)
 
-    # k_candidates = list(range(5, 13))
-    # K = select_k_by_value_homogeneity(X_scaled, traj_returns, k_candidates)
-    # print(f"Selected K for clustering: {K}")
     K = 5
-
     kmeans = KMeans(n_clusters=K, random_state=0)
     cluster_ids = kmeans.fit_predict(X_scaled)
     visualize_traj_clusters(X_pca, cluster_ids, lengths, save_prefix=f"{FLAGS.env_name}_kmeans_{K}")
@@ -380,10 +424,7 @@ def main(_):
         )
     columns = ["cid", "n", "len_mean", "len_std", "ret_mean"]
     data = [[d[c] for c in columns] for d in cluster_stats]
-
-    wandb.log(
-        {"cluster/stats": wandb.Table(columns=columns, data=data)}
-    )
+    wandb.log({"cluster/stats": wandb.Table(columns=columns, data=data)})
 
     cluster_sampler = ClusterBalancedSampler(cluster_ids=cluster_ids, trajectory_boundaries=trajectory_boundaries)
 
@@ -416,32 +457,25 @@ def main(_):
                 FLAGS.discount,
                 return_ids=True,
             )
-
-            # cluster sampling stats (offline)
-            if "cluster_ids" in batch:
-                cids = np.asarray(batch["cluster_ids"])
-                counts = np.bincount(cids, minlength=cluster_sampler.K)
-                probs = counts / np.maximum(1, counts.sum())
-                eps = 1e-12
-                entropy = float(-(probs * np.log(probs + eps)).sum())
-                kl_u = float((probs * (np.log(probs + eps) - np.log(1.0 / cluster_sampler.K))).sum())
-                ess = float(1.0 / (np.sum(probs**2) + eps))
-
-                wandb.log(
-                    {
-                        "cluster/offline/prob_entropy": entropy,
-                        "cluster/offline/kl_to_uniform": kl_u,
-                        "cluster/offline/ess": ess,
-                        "cluster/offline/count_min": int(counts.min()),
-                        "cluster/offline/count_max": int(counts.max()),
-                    },
-                    step=step,
-                )
-
-                for k in range(cluster_sampler.K):
-                    wandb.log({f"cluster/offline/prob_{k}": float(probs[k])}, step=step)
         else:
             batch = train_dataset.sample_sequence(config["batch_size"], FLAGS.horizon_length, FLAGS.discount)
+
+        # ✅ Chunked-PARS: attach pa_actions (offline)
+        if FLAGS.use_chunked_pars:
+            B = config["batch_size"]
+            H = FLAGS.horizon_length
+            d = act_example.shape[-1]
+            pa_actions = sample_infeasible_chunks(
+                batch_size=B,
+                H=H,
+                act_dim=d,
+                low=act_low,
+                high=act_high,
+                guard=FLAGS.pa_guard,
+                delta=FLAGS.pa_delta,
+            )
+            batch = dict(batch)
+            batch["pa_actions"] = pa_actions
 
         agent, info = agent.update(batch)
 
@@ -472,7 +506,6 @@ def main(_):
     save_states = FLAGS.save_all_online_states
     if save_states:
         from collections import defaultdict
-
         state_log = defaultdict(list)
         online_start_time = time.time()
 
@@ -494,16 +527,13 @@ def main(_):
 
         if is_robomimic_env(FLAGS.env_name):
             r = r - 1.0
-
         if FLAGS.sparse:
             assert r <= 0.0
             r = -1.0 if r != 0.0 else 0.0
 
-        # log env distances, etc.
         env_info = {k: v for k, v in info.items() if k.startswith("distance")}
         logger.log(env_info, "env", step=global_step)
 
-        # Save raw states if requested
         if save_states:
             state = env.get_state()
             state_log["steps"].append(step)
@@ -513,7 +543,7 @@ def main(_):
             if "button_states" in state:
                 state_log["button_states"].append(np.copy(state["button_states"]))
 
-        # ✅ success signal extraction
+        # success
         if "success" in info and isinstance(info["success"], (int, float, bool, np.number)):
             is_success = float(info["success"])
         elif "is_success" in info:
@@ -545,15 +575,12 @@ def main(_):
             if is_success > 0.5:
                 online_success_count += 1
 
-            # ✅ PTR online update: terminals 기반으로 boundaries 재구성 (가장 견고)
             if FLAGS.use_ptr_online_priority and ptr_sampler is not None:
                 N = replay_buffer.size
-
                 terminals = np.nonzero(replay_buffer["terminals"][:N] > 0)[0]
                 initials = np.concatenate([[0], terminals[:-1] + 1])
                 new_boundaries = list(zip(initials, terminals))
 
-                # sampler가 참조하는 소스를 replay_buffer로 유지
                 ptr_sampler.trajectory_boundaries = new_boundaries
                 ptr_sampler.rewards_source = replay_buffer["rewards"]
                 if hasattr(ptr_sampler, "success_source"):
@@ -588,6 +615,24 @@ def main(_):
                     config["batch_size"] * FLAGS.utd_ratio, FLAGS.horizon_length, FLAGS.discount
                 )
 
+            # ✅ Chunked-PARS: attach pa_actions (online, BEFORE reshape)
+            if FLAGS.use_chunked_pars:
+                Btot = config["batch_size"] * FLAGS.utd_ratio
+                H = FLAGS.horizon_length
+                d = act_example.shape[-1]
+                pa_actions = sample_infeasible_chunks(
+                    batch_size=Btot,
+                    H=H,
+                    act_dim=d,
+                    low=act_low,
+                    high=act_high,
+                    guard=FLAGS.pa_guard,
+                    delta=FLAGS.pa_delta,
+                )
+                batch = dict(batch)
+                batch["pa_actions"] = pa_actions
+
+            # reshape to (utd, B, ...)
             batch = jax.tree.map(
                 lambda x: x.reshape((FLAGS.utd_ratio, config["batch_size"]) + x.shape[1:]),
                 batch,
@@ -605,7 +650,6 @@ def main(_):
                 td_err = np.asarray(info["critic/td_error_per_sample"])
                 traj_ids = np.asarray(batch["traj_ids"])
 
-                # (utd,B,H) -> (utd,B)
                 if td_err.ndim == 3:
                     td_err = np.max(np.abs(td_err), axis=-1)
                 else:

@@ -19,16 +19,24 @@ from envs.robomimic_utils import is_robomimic_env
 from evaluation import evaluate
 from log_utils import CsvLogger, get_exp_name, get_flag_dict, setup_wandb
 from utils.flax_utils import save_agent
+
+# ✅ success 버전 dataset / replay / sampler
 from utils.datasets import Dataset, ReplayBuffer, PriorityTrajectorySampler
 
-from cluster_vis import build_traj_features, visualize_traj_clusters, select_k_by_value_homogeneity
+from cluster_vis import (
+    build_traj_features,
+    select_k_by_value_homogeneity,
+    visualize_traj_clusters,
+)
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
-from sklearn.cluster import KMeans, SpectralClustering
-from sklearn.mixture import GaussianMixture
+from sklearn.cluster import KMeans
 
 FLAGS = flags.FLAGS
 
+# ============================================================================
+# FLAGS
+# ============================================================================
 flags.DEFINE_string("run_group", "Debug", "Run group.")
 flags.DEFINE_integer("seed", 0, "Random seed.")
 flags.DEFINE_string("env_name", "cube-triple-play-singletask-task2-v0", "Environment.")
@@ -58,20 +66,30 @@ flags.DEFINE_string("ogbench_dataset_dir", None, "OGBench dataset directory.")
 flags.DEFINE_integer("horizon_length", 5, "Action chunk horizon.")
 flags.DEFINE_bool("sparse", False, "Sparse reward flag.")
 
-flags.DEFINE_string('entity', 'entity', 'wandb entity')
+# wandb
+flags.DEFINE_string("entity", "entity", "wandb entity")
 
+# PTR
 flags.DEFINE_bool("use_ptr_backward", True, "Use PTR trajectory-priority sampling.")
 flags.DEFINE_bool("use_ptr_online_priority", True, "Update PTR priorities online.")
 flags.DEFINE_bool("save_all_online_states", False, "Save trajectory states.")
 flags.DEFINE_bool("backward", False, "PTR backward sampling.")
 flags.DEFINE_float("beta", 0.5, "Beta for PTR sarsa target critic weighted target.")
 flags.DEFINE_bool("use_weighted_target", False, "Use PTR sarsa target critic weighted target.")
-flags.DEFINE_string("metric", "success_binary", "PTR priority metric")
+flags.DEFINE_string(
+    "metric",
+    "success_binary",
+    "PTR priority metric : uniform success_binary avg_reward uqm_reward uhm_reward min_reward td_error_rank",
+)
 flags.DEFINE_integer("ptr_warmup_steps", 20000, "Number of online steps before enabling PTR sampling.")
 
+# Cluster
 flags.DEFINE_bool("cluster_sampler", False, "Cluster Sampler (kmeans)")
 
 
+# ============================================================================
+# Logging helper
+# ============================================================================
 class LoggingHelper:
     def __init__(self, csv_loggers, wandb_logger):
         self.csv_loggers = csv_loggers
@@ -83,10 +101,8 @@ class LoggingHelper:
         self.csv_loggers[prefix].log(data, step)
         if wandb_step is None:
             wandb_step = step
-        self.wandb_logger.log(
-            {f"{prefix}/{k}": v for k, v in data.items()},
-            step=wandb_step,
-        )
+        self.wandb_logger.log({f"{prefix}/{k}": v for k, v in data.items()}, step=wandb_step)
+
 
 
 def sample_sequence_PTR(
@@ -98,8 +114,9 @@ def sample_sequence_PTR(
     backward=True,
     log_prefix=None,
     global_step=None,
+    max_resample_tries=50,
 ):
-    traj_ids = ptr_sampler.sample_trajectory_indices(batch_size)
+    traj_ids = np.asarray(ptr_sampler.sample_trajectory_indices(batch_size), dtype=np.int32)
     boundaries = ptr_sampler.trajectory_boundaries
 
     start_idxs = np.empty(batch_size, dtype=np.int64)
@@ -110,23 +127,34 @@ def sample_sequence_PTR(
     last_rewards = []
     sampled_priors = []
 
-    for i, tid in enumerate(traj_ids):
+    for i in range(batch_size):
+        # ---- resample traj until it's long enough (or give up gracefully) ----
+        tid = int(traj_ids[i])
+        for _ in range(max_resample_tries):
+            s0, e0 = boundaries[tid]
+            traj_len = e0 - s0 + 1
+            if traj_len >= seq_len:
+                break
+            tid = int(ptr_sampler.sample_trajectory_indices(1)[0])
+        traj_ids[i] = tid
+
         start, end = boundaries[tid]
         traj_len = end - start + 1
+
+        # ---- choose start within this (tid) trajectory ----
         if traj_len < seq_len:
-            start_idxs[i] = np.random.randint(0, dataset.size - seq_len + 1)
-            continue
-        if backward:
-            if traj_len >= seq_len:
+            # fallback: still stay inside the same traj (consistent with traj_id)
+            s = start
+        else:
+            if backward:
                 s = end - seq_len + 1
             else:
-                s = start
-        else:
-            max_start = min(end - seq_len + 1, dataset.size - seq_len)
-            s = np.random.randint(start, max_start + 1) if max_start >= start else start
+                max_start = end - seq_len + 1
+                s = np.random.randint(start, max_start + 1)
 
         start_idxs[i] = s
 
+        # ---- logging stats (optional) ----
         if log_prefix is not None:
             denom = max(1, traj_len - seq_len + 1)
             rel_pos = (s - start) / denom
@@ -143,9 +171,9 @@ def sample_sequence_PTR(
                 sampled_priors.append(float(ptr_sampler.priorities[tid]))
 
     batch = dataset.sample_sequence_from_start_idxs(start_idxs, seq_len, discount)
-
     batch = dict(batch)
-    batch["traj_ids"] = np.asarray(traj_ids, dtype=np.int32)
+    batch["traj_ids"] = traj_ids
+    batch["start_idxs"] = start_idxs
 
     if log_prefix is not None and global_step is not None and len(rel_starts) > 0:
         log_dict = {
@@ -166,16 +194,17 @@ def sample_sequence_PTR(
     return batch
 
 
+# ============================================================================
+# Cluster sampler
+# ============================================================================
 class ClusterBalancedSampler:
     def __init__(self, cluster_ids, trajectory_boundaries):
         self.cluster_ids = np.array(cluster_ids)
         self.boundaries = trajectory_boundaries
-
         self.clusters = {}
         for cid in np.unique(cluster_ids):
             idxs = np.where(cluster_ids == cid)[0]
             self.clusters[cid] = idxs
-
         self.K = len(self.clusters)
 
     def sample_traj_ids(self, batch_size):
@@ -214,13 +243,14 @@ class ClusterBalancedSampler:
         return batch
 
 
+# ============================================================================
+# MAIN
+# ============================================================================
 def main(_):
     exp_name = get_exp_name(FLAGS.seed)
     run = setup_wandb(entity=FLAGS.entity, project="qc", group=FLAGS.run_group, name=exp_name)
 
-    FLAGS.save_dir = os.path.join(
-        FLAGS.save_dir, wandb.run.project, FLAGS.run_group, FLAGS.env_name, exp_name
-    )
+    FLAGS.save_dir = os.path.join(FLAGS.save_dir, wandb.run.project, FLAGS.run_group, FLAGS.env_name, exp_name)
     os.makedirs(FLAGS.save_dir, exist_ok=True)
 
     with open(os.path.join(FLAGS.save_dir, "flags.json"), "w") as f:
@@ -231,23 +261,23 @@ def main(_):
     config["use_weighted_target"] = FLAGS.use_weighted_target
     config["beta"] = FLAGS.beta
 
+    # Env & Dataset
     if FLAGS.ogbench_dataset_dir:
         dataset_paths = sorted(
-            f for f in glob.glob(f"{FLAGS.ogbench_dataset_dir}/*.npz")
-            if "-val.npz" not in f
+            f for f in glob.glob(f"{FLAGS.ogbench_dataset_dir}/*.npz") if "-val.npz" not in f
         )
         env, eval_env, train_dataset, val_dataset = make_ogbench_env_and_datasets(
-            FLAGS.env_name,
-            dataset_path=dataset_paths[0],
-            compact_dataset=False,
+            FLAGS.env_name, dataset_path=dataset_paths[0], compact_dataset=False
         )
     else:
         env, eval_env, train_dataset, val_dataset = make_env_and_datasets(FLAGS.env_name)
 
+    # RNG & Seeding
     random.seed(FLAGS.seed)
     np.random.seed(FLAGS.seed)
     online_rng, _ = jax.random.split(jax.random.PRNGKey(FLAGS.seed))
 
+    # Process offline dataset
     def process_train_dataset(ds):
         ds = Dataset.create(**ds)
 
@@ -270,28 +300,29 @@ def main(_):
         return ds
 
     train_dataset = process_train_dataset(train_dataset)
+ 
+    # Always add "is_sucess" when aking replay buffer
+    d0 = dict(train_dataset)
+    if "is_success" not in d0:
+        d0["is_success"] = np.zeros_like(d0["terminals"], dtype=np.float32)
 
-    d = dict(train_dataset)
-    if "is_success" not in d:
-        d["is_success"] = np.zeros_like(d["terminals"], dtype=np.float32)
+    # Initial Replay buffer once
+    buffer_size = max(FLAGS.buffer_size, train_dataset.size + 1)
+    replay_buffer = ReplayBuffer.create_from_initial_dataset(d0, size=buffer_size)
 
-    replay_buffer = ReplayBuffer.create_from_initial_dataset(
-        d,
-        size=max(FLAGS.buffer_size, train_dataset.size + 1),
-    )
-
+    # PTR Initialization (offline boundaries)
     (terminal_locs,) = np.nonzero(train_dataset["terminals"] > 0)
     initial_locs = np.concatenate([[0], terminal_locs[:-1] + 1])
     trajectory_boundaries = list(zip(initial_locs, terminal_locs))
 
-    num_traj = len(trajectory_boundaries)
-
+    # returns (for clustering K selection)
     traj_returns = []
     for (s, e) in trajectory_boundaries:
         r = train_dataset["rewards"][s : e + 1]
         traj_returns.append(float(r.sum()))
     traj_returns = np.asarray(traj_returns, dtype=np.float64)
 
+    # Build features for clustering (offline)
     features, lengths = build_traj_features(
         train_dataset,
         trajectory_boundaries,
@@ -300,51 +331,45 @@ def main(_):
         k_keyframes=20,
     )
 
+    # Create PTR Sampler
     ptr_sampler = None
     if FLAGS.use_ptr_backward:
         ptr_sampler = PriorityTrajectorySampler(
             trajectory_boundaries=trajectory_boundaries,
-            rewards_source=replay_buffer["rewards"],
-            success_source=replay_buffer["is_success"],
+            rewards_source=replay_buffer["rewards"],     
+            success_source=replay_buffer["is_success"],   
             metric=FLAGS.metric,
             temperature=1.0,
         )
+        ptr_sampler.num_offline_traj = len(trajectory_boundaries)
 
-    ptr_sampler.num_offline_traj = len(trajectory_boundaries)
-
-    online_ep_start = replay_buffer.pointer
-
+    # Cluster Initialization
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(features).astype(np.float64)
     pca_2d = PCA(n_components=2, random_state=0)
     X_pca = pca_2d.fit_transform(X_scaled)
 
-    k_candidates = list(range(5, 13))
-    K = select_k_by_value_homogeneity(X_scaled, traj_returns, k_candidates)
-    print(f"Selected K for clustering: {K}")
-    print("Selected K:", K)
+    # k_candidates = list(range(5, 13))
+    # K = select_k_by_value_homogeneity(X_scaled, traj_returns, k_candidates)
+    # print(f"Selected K for clustering: {K}")
+    K = 5
 
     kmeans = KMeans(n_clusters=K, random_state=0)
     cluster_ids = kmeans.fit_predict(X_scaled)
-    visualize_traj_clusters(
-        X_pca,
-        cluster_ids,
-        lengths,
-        save_prefix=f"{FLAGS.env_name}_kmeans_{K}"
-    )
-    print(f"kmeans pngs are saved!")
+    visualize_traj_clusters(X_pca, cluster_ids, lengths, save_prefix=f"{FLAGS.env_name}_kmeans_{K}")
+    print("kmeans pngs are saved!")
 
+    # cluster stats log
     cluster_stats = []
     for cid in range(K):
         idxs = np.where(cluster_ids == cid)[0]
         if len(idxs) == 0:
             continue
-
         lengths_c = lengths[idxs]
         returns_c = traj_returns[idxs]
         cluster_stats.append(
             {
-                "cid": cid,
+                "cid": int(cid),
                 "n": int(len(idxs)),
                 "len_mean": float(lengths_c.mean()),
                 "len_std": float(lengths_c.std()),
@@ -354,36 +379,32 @@ def main(_):
     columns = ["cid", "n", "len_mean", "len_std", "ret_mean"]
     data = [[d[c] for c in columns] for d in cluster_stats]
 
-    wandb.log({"cluster/stats": wandb.Table(columns=columns, data=data)})
-
-    cluster_sampler = ClusterBalancedSampler(
-        cluster_ids=cluster_ids,
-        trajectory_boundaries=trajectory_boundaries
+    wandb.log(
+        {"cluster/stats": wandb.Table(columns=columns, data=data)}
     )
 
+    cluster_sampler = ClusterBalancedSampler(cluster_ids=cluster_ids, trajectory_boundaries=trajectory_boundaries)
+
+    # Agent Initialization
     example_batch = train_dataset.sample(1)
     obs_example = example_batch["observations"]
     act_example = example_batch["actions"]
     agent_class = agents[config["agent_name"]]
-    agent = agent_class.create(
-        FLAGS.seed,
-        obs_example,
-        act_example,
-        config,
-    )
+    agent = agent_class.create(FLAGS.seed, obs_example, act_example, config)
 
+    # Logging setup
     prefixes = ["eval", "env"]
     if FLAGS.offline_steps > 0:
         prefixes.append("offline_agent")
     if FLAGS.online_steps > 0:
         prefixes.append("online_agent")
 
-    loggers = {
-        p: CsvLogger(os.path.join(FLAGS.save_dir, f"{p}.csv")) for p in prefixes
-    }
+    loggers = {p: CsvLogger(os.path.join(FLAGS.save_dir, f"{p}.csv")) for p in prefixes}
     logger = LoggingHelper(loggers, wandb)
 
-    # Offline RL
+    # ============================================================================
+    # OFFLINE RL
+    # ============================================================================
     for step in tqdm.tqdm(range(1, FLAGS.offline_steps + 1)):
         if FLAGS.cluster_sampler:
             batch = cluster_sampler.sample_sequence(
@@ -391,43 +412,34 @@ def main(_):
                 config["batch_size"],
                 FLAGS.horizon_length,
                 FLAGS.discount,
-                return_ids=True
-            )
-        else:
-            batch = train_dataset.sample_sequence(
-                config["batch_size"],
-                FLAGS.horizon_length,
-                FLAGS.discount,
+                return_ids=True,
             )
 
-        if FLAGS.cluster_sampler and "cluster_ids" in batch:
-            cids = np.asarray(batch["cluster_ids"])
-            counts = np.bincount(cids, minlength=cluster_sampler.K)
-            probs = counts / np.maximum(1, counts.sum())
+            # cluster sampling stats (offline)
+            if "cluster_ids" in batch:
+                cids = np.asarray(batch["cluster_ids"])
+                counts = np.bincount(cids, minlength=cluster_sampler.K)
+                probs = counts / np.maximum(1, counts.sum())
+                eps = 1e-12
+                entropy = float(-(probs * np.log(probs + eps)).sum())
+                kl_u = float((probs * (np.log(probs + eps) - np.log(1.0 / cluster_sampler.K))).sum())
+                ess = float(1.0 / (np.sum(probs**2) + eps))
 
-            eps = 1e-12
-            entropy = float(-(probs * np.log(probs + eps)).sum())
-            kl_u = float(
-                (probs * (np.log(probs + eps) - np.log(1.0 / cluster_sampler.K))).sum()
-            )
-            ess = float(1.0 / (np.sum(probs ** 2) + eps))
-
-            wandb.log(
-                {
-                    "cluster/offline/prob_entropy": entropy,
-                    "cluster/offline/kl_to_uniform": kl_u,
-                    "cluster/offline/ess": ess,
-                    "cluster/offline/count_min": int(counts.min()),
-                    "cluster/offline/count_max": int(counts.max()),
-                },
-                step=step,
-            )
-
-            for k in range(cluster_sampler.K):
                 wandb.log(
-                    {f"cluster/offline/prob_{k}": float(probs[k])},
+                    {
+                        "cluster/offline/prob_entropy": entropy,
+                        "cluster/offline/kl_to_uniform": kl_u,
+                        "cluster/offline/ess": ess,
+                        "cluster/offline/count_min": int(counts.min()),
+                        "cluster/offline/count_max": int(counts.max()),
+                    },
                     step=step,
                 )
+
+                for k in range(cluster_sampler.K):
+                    wandb.log({f"cluster/offline/prob_{k}": float(probs[k])}, step=step)
+        else:
+            batch = train_dataset.sample_sequence(config["batch_size"], FLAGS.horizon_length, FLAGS.discount)
 
         agent, info = agent.update(batch)
 
@@ -445,19 +457,9 @@ def main(_):
             )
             logger.log(eval_info, "eval", step)
 
-    # Online RL
-    d = dict(train_dataset)
-    if "is_success" not in d:
-        d["is_success"] = np.zeros_like(d["terminals"], dtype=np.float32)
-    for k, v in d.items():
-        a = np.asarray(v)
-        print(k, "dtype", a.dtype, "ndim", a.ndim, "shape", getattr(a, "shape", None))
-        if a.ndim == 0:
-            print("  >>> [BAD] scalar detected:", k, a)
-
-    buffer_size = max(FLAGS.buffer_size, len(d["rewards"]) + 1)
-    replay_buffer = ReplayBuffer.create_from_initial_dataset(d, size=buffer_size)
-
+    # ============================================================================
+    # ONLINE RL
+    # ============================================================================
     ob, _ = env.reset()
     action_queue = []
     current_traj = []
@@ -468,6 +470,7 @@ def main(_):
     save_states = FLAGS.save_all_online_states
     if save_states:
         from collections import defaultdict
+
         state_log = defaultdict(list)
         online_start_time = time.time()
 
@@ -475,6 +478,7 @@ def main(_):
         global_step = FLAGS.offline_steps + step
         online_rng, key = jax.random.split(online_rng)
 
+        # action chunking
         if not action_queue:
             a = agent.sample_actions(observations=ob, rng=key)
             chunk = np.array(a).reshape(-1, act_example.shape[-1])
@@ -482,6 +486,7 @@ def main(_):
 
         action = action_queue.pop(0)
 
+        # Env step
         next_ob, r, terminated, truncated, info = env.step(action)
         done = bool(terminated or truncated)
 
@@ -492,9 +497,11 @@ def main(_):
             assert r <= 0.0
             r = -1.0 if r != 0.0 else 0.0
 
+        # log env distances, etc.
         env_info = {k: v for k, v in info.items() if k.startswith("distance")}
         logger.log(env_info, "env", step=global_step)
 
+        # Save raw states if requested
         if save_states:
             state = env.get_state()
             state_log["steps"].append(step)
@@ -504,6 +511,7 @@ def main(_):
             if "button_states" in state:
                 state_log["button_states"].append(np.copy(state["button_states"]))
 
+        # success signal extraction
         if "success" in info and isinstance(info["success"], (int, float, bool, np.number)):
             is_success = float(info["success"])
         elif "is_success" in info:
@@ -529,20 +537,21 @@ def main(_):
         current_traj.append(transition)
         ob = next_ob
 
+        # End of episode
         if done:
             online_episode_count += 1
-
             if is_success > 0.5:
                 online_success_count += 1
 
             if FLAGS.use_ptr_online_priority and ptr_sampler is not None:
-                ep_end = (replay_buffer.pointer - 1) % replay_buffer.max_size
+                N = replay_buffer.size
 
-                if ep_end >= online_ep_start:
-                    ptr_sampler.trajectory_boundaries.append((online_ep_start, ep_end))
+                terminals = np.nonzero(replay_buffer["terminals"][:N] > 0)[0]
+                initials = np.concatenate([[0], terminals[:-1] + 1])
+                new_boundaries = list(zip(initials, terminals))
 
-                online_ep_start = replay_buffer.pointer
-
+                # sampler가 참조하는 소스를 replay_buffer로 유지
+                ptr_sampler.trajectory_boundaries = new_boundaries
                 ptr_sampler.rewards_source = replay_buffer["rewards"]
                 if hasattr(ptr_sampler, "success_source"):
                     ptr_sampler.success_source = replay_buffer["is_success"]
@@ -554,11 +563,10 @@ def main(_):
             ob, _ = env.reset()
             action_queue = []
 
+        # Online Training
         if step >= FLAGS.start_training:
             use_ptr_now = (
-                FLAGS.use_ptr_backward
-                and ptr_sampler is not None
-                and step >= FLAGS.ptr_warmup_steps
+                FLAGS.use_ptr_backward and ptr_sampler is not None and step >= FLAGS.ptr_warmup_steps
             )
 
             if use_ptr_now:
@@ -574,9 +582,7 @@ def main(_):
                 )
             else:
                 batch = replay_buffer.sample_sequence(
-                    config["batch_size"] * FLAGS.utd_ratio,
-                    FLAGS.horizon_length,
-                    FLAGS.discount,
+                    config["batch_size"] * FLAGS.utd_ratio, FLAGS.horizon_length, FLAGS.discount
                 )
 
             batch = jax.tree.map(
@@ -585,6 +591,7 @@ def main(_):
             )
             agent, info = agent.batch_update(batch)
 
+            # TD-error rank priority update
             if (
                 use_ptr_now
                 and FLAGS.use_ptr_online_priority
@@ -595,6 +602,7 @@ def main(_):
                 td_err = np.asarray(info["critic/td_error_per_sample"])
                 traj_ids = np.asarray(batch["traj_ids"])
 
+                # (utd,B,H) -> (utd,B)
                 if td_err.ndim == 3:
                     td_err = np.max(np.abs(td_err), axis=-1)
                 else:
@@ -609,6 +617,7 @@ def main(_):
 
             logger.log(info, "online_agent", step=global_step)
 
+        # Evaluation
         if step % FLAGS.eval_interval == 0:
             eval_info, _, _ = evaluate(
                 agent=agent,
@@ -620,9 +629,13 @@ def main(_):
             )
             logger.log(eval_info, "eval", global_step)
 
+        # Saving
         if FLAGS.save_interval > 0 and step % FLAGS.save_interval == 0:
             save_agent(agent, FLAGS.save_dir, global_step)
 
+    # ============================================================================
+    # Finalization
+    # ============================================================================
     if save_states:
         end_time = time.time()
         c_data = {
