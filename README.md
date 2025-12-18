@@ -1,6 +1,6 @@
 <div align="center">
 
-# Trajectory-level Priority Sampling for Off-to-Online RL
+# Trajectory-level Priority Sampling for Off-to-On RL
 
 </div>
 
