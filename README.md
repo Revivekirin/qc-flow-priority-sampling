@@ -62,50 +62,54 @@ For sparse reward environments (`scene` and `puzzle-3x3`), use `--sparse=True`.
 ### Basic Usage
 ```bash
 # Baseline: ACFQL
-MUJOCO_GL=egl python train.py \
+MUJOCO_GL=egl python main_acfql.py \
   --run_group=baseline \
-  --env_name=cube-triple-play-singletask-task2-v0 \
+  --env_name=square-mh-low \
   --sparse=False \
   --horizon_length=5 \
   --offline_steps=1000000 \
   --online_steps=1000000
+  --entity=P{YOUR_WANDB_ENTITY} \
 
 # With Cluster-balanced Sampling (Offline)
-MUJOCO_GL=egl python train.py \
+MUJOCO_GL=egl python main.py \
+  --env_name=square-mh-low \
   --run_group=cluster_balanced \
-  --env_name=cube-triple-play-singletask-task2-v0 \
+  --use_ptr_backward=True \
+  --use_ptr_online_priority=True \
   --sparse=False \
+  --agent.alpha=100 \
   --horizon_length=5 \
+  --metric=uniform \
   --cluster_sampler=True \
-  --offline_steps=1000000 \
-  --online_steps=1000000
+  --entity=P{YOUR_WANDB_ENTITY} \
 
 # With T-PER (Online Priority Sampling)
-MUJOCO_GL=egl python train.py \
+MUJOCO_GL=egl python main.py \
+  --env_name=square-mh-low \
   --run_group=tper \
-  --env_name=cube-triple-play-singletask-task2-v0 \
-  --sparse=False \
-  --horizon_length=5 \
   --use_ptr_backward=True \
   --use_ptr_online_priority=True \
+  --sparse=False \
+  --agent.alpha=100 \
+  --horizon_length=5 \
   --metric=td_error_rank \
-  --backward=True \
-  --offline_steps=1000000 \
-  --online_steps=1000000
+  --cluster_sampler=False \
+  --entity=P{YOUR_WANDB_ENTITY} \
 
 # Full Method: Cluster-balanced + T-PER
-MUJOCO_GL=egl python train.py \
-  --run_group=full_method \
-  --env_name=cube-triple-play-singletask-task2-v0 \
-  --sparse=False \
-  --horizon_length=5 \
-  --cluster_sampler=True \
+MUJOCO_GL=egl python main.py \
+  --env_name=square-mh-low \
+  --run_group=tper \
   --use_ptr_backward=True \
   --use_ptr_online_priority=True \
+  --sparse=False \
+  --agent.alpha=100 \
+  --horizon_length=5 \
   --metric=td_error_rank \
-  --backward=True \
-  --offline_steps=1000000 \
-  --online_steps=1000000
+  --cluster_sampler=True \
+  --entity=P{YOUR_WANDB_ENTITY} \
+
 ```
 
 ### Key Hyperparameters
