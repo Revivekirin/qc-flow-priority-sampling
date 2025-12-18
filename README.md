@@ -1,6 +1,7 @@
 <div align="center">
 
-# Trajectory-level Priority Sampling for Stable Offline-to-Online RL
+# Trajectory-level Priority Sampling for
+# Stable Offline-to-Online RL
 
 </div>
 
