@@ -61,7 +61,8 @@ For sparse reward environments (`scene` and `puzzle-3x3`), use `--sparse=True`.
 
 ### K init
 There a few candidate for selecting K when using elbow method.
-Initially, we use **K=7** for square task and **K=5** for transport task
+
+Initially, we used **K=7** for square task and **K=5** for transport task
 
 ### Basic Usage
 ```bash
