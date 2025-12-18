@@ -47,12 +47,6 @@ For robomimic environments, datasets should be located at:
 
 Download from: https://robomimic.github.io/docs/datasets/robomimic_v0.1.html (Method 2: Direct Download Links - Multi-Human (MH))
 
-For cube-quadruple, use the 100M-size offline dataset:
-```bash
-wget -r -np -nH --cut-dirs=2 -A "*.npz" https://rail.eecs.berkeley.edu/datasets/ogbench/cube-quadruple-play-100m-v0/
-```
-Add flag: `--ogbench_dataset_dir=[realpath/to/your/cube-quadruple-play-100m-v0/]`
-
 For sparse reward environments (`scene` and `puzzle-3x3`), use `--sparse=True`.
 
 ## Running Experiments
