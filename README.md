@@ -47,8 +47,6 @@ For robomimic environments, datasets should be located at:
 
 Download from: https://robomimic.github.io/docs/datasets/robomimic_v0.1.html (Method 2: Direct Download Links - Multi-Human (MH))
 
-For sparse reward environments (`scene` and `puzzle-3x3`), use `--sparse=True`.
-
 ## Running Experiments
 
 ### K init
