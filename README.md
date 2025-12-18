@@ -43,9 +43,7 @@ pip install -r requirements.txt
 
 ## Datasets
 For robomimic environments, datasets should be located at:
-- `~/.robomimic/lift/mh/low_dim_v15.hdf5`
-- `~/.robomimic/can/mh/low_dim_v15.hdf5`
-- `~/.robomimic/square/mh/low_dim_v15.hdf5`
+- `~/.robomimic/{task}/mh/low_dim_v15.hdf5`
 
 Download from: https://robomimic.github.io/docs/datasets/robomimic_v0.1.html (Method 2: Direct Download Links - Multi-Human (MH))
 
