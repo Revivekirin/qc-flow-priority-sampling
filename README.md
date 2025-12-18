@@ -29,7 +29,7 @@ This work introduces trajectory-level priority sampling methods for stable offli
 These methods improve sample efficiency and training stability in sparse reward robotic manipulation tasks.
 
 ## Code Base
-This implementation is built on top of [Action Chunking with Flow Q-Learning (ACFQL)]((https://github.com/ColinQiyangLi/qc)), extending it with trajectory-level sampling strategies.
+This implementation is built on top of [Action Chunking with Flow Q-Learning (ACFQL)](https://github.com/ColinQiyangLi/qc), extending it with trajectory-level sampling strategies.
 
 ## Installation
 ```bash
