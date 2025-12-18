@@ -121,10 +121,10 @@ MUJOCO_GL=egl python main.py \
 - `--use_ptr_backward`: Enable backward sampling from trajectory endpoints
 - `--use_ptr_online_priority`: Enable online priority updates based on TD-error
 - `--metric`: Priority metric (`td_error_rank`, `success_binary`, `avg_reward`)
-- `--backward`: Sample from end of trajectories (recommended for sparse rewards)
 - `--ptr_warmup_steps`: Steps before enabling priority sampling (default: 20000)
+- `--backward`: Sample from end of trajectories (not recommended on ACFQL baseline)
 
-**SARSA-style Weighted Target:**
+**SARSA-style Weighted Target (not recommended):**
 - `--use_weighted_target`: Enable weighted combination of policy and trajectory targets
 - `--beta`: Weight for policy target (default: 0.5)
 
@@ -132,7 +132,7 @@ MUJOCO_GL=egl python main.py \
 
 ```
 .
-├── train.py                      # Main training script
+├── main.py                      # Main training script
 ├── agents/
 │   └── acfql.py                 # ACFQL agent with priority sampling
 ├── utils/
