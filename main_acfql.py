@@ -15,6 +15,8 @@ from agents import agents
 import numpy as np
 import jax.numpy as jnp
 
+from utils.wandb_plots import log_q_geometry_plots, create_q_geometry_summary_table
+
 if 'CUDA_VISIBLE_DEVICES' in os.environ:
     os.environ['EGL_DEVICE_ID'] = os.environ['CUDA_VISIBLE_DEVICES']
     os.environ['MUJOCO_EGL_DEVICE_ID'] = os.environ['CUDA_VISIBLE_DEVICES']
@@ -53,6 +55,9 @@ flags.DEFINE_bool('sparse', False, "make the task sparse reward")
 
 flags.DEFINE_bool('save_all_online_states', False, "save all trajectories to npy")
 
+# wandb
+flags.DEFINE_string("entity", "entity", "wandb entity")
+
 class LoggingHelper:
     def __init__(self, csv_loggers, wandb_logger):
         self.csv_loggers = csv_loggers
@@ -67,7 +72,7 @@ class LoggingHelper:
 
 def main(_):
     exp_name = get_exp_name(FLAGS.seed)
-    run = setup_wandb(project='qc', group=FLAGS.run_group, name=exp_name)
+    run = setup_wandb(project='qc', group=FLAGS.run_group, name=exp_name, entity=FLAGS.entity)
     
     FLAGS.save_dir = os.path.join(FLAGS.save_dir, wandb.run.project, FLAGS.run_group, FLAGS.env_name, exp_name)
     os.makedirs(FLAGS.save_dir, exist_ok=True)
@@ -168,7 +173,7 @@ def main(_):
 
         if FLAGS.ogbench_dataset_dir is not None and FLAGS.dataset_replace_interval != 0 and i % FLAGS.dataset_replace_interval == 0:
             dataset_idx = (dataset_idx + 1) % len(dataset_paths)
-            print(f"Using new dataset: {dataset_paths[dataset_idx]}", flush=True)
+            # print(f"Using new dataset: {dataset_paths[dataset_idx]}", flush=True)
             train_dataset, val_dataset = make_ogbench_env_and_datasets(
                 FLAGS.env_name,
                 dataset_path=dataset_paths[dataset_idx],
@@ -181,10 +186,13 @@ def main(_):
         batch = train_dataset.sample_sequence(config['batch_size'], sequence_length=FLAGS.horizon_length, discount=discount)
 
         agent, offline_info = agent.update(batch)
-        print("[DEBUG] offline info:", offline_info)
+        # print("[DEBUG] offline info:", offline_info)
 
         if i % FLAGS.log_interval == 0:
             logger.log(offline_info, "offline_agent", step=log_step)
+
+        if i % (FLAGS.log_interval * 10) == 0: 
+            log_q_geometry_plots(offline_info, step=log_step)
         
         # saving
         if FLAGS.save_interval > 0 and i % FLAGS.save_interval == 0:
@@ -203,6 +211,10 @@ def main(_):
                 video_frame_skip=FLAGS.video_frame_skip,
             )
             logger.log(eval_info, "eval", step=log_step)
+
+            q_table = create_q_geometry_summary_table(offline_info)
+            wandb.log({'tables/q_geometry': q_table}, step=log_step)
+
 
     # transition from offline to online
     replay_buffer = ReplayBuffer.create_from_initial_dataset(
